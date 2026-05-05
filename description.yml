@@ -1,0 +1,23 @@
+extension:
+  name: cozip
+  description: Read and validate cozip priority indexes from DuckDB
+  version: 0.1.0
+  language: C++
+  build: cmake
+  license: MIT
+  maintainers:
+    - Asterisk Labs
+repo:
+  github: asterisk-labs/cozip_reader
+  ref: main
+docs:
+  hello_world: |
+    LOAD cozip;
+    SELECT * FROM cozip_index('test/data/flat_store_6files.cozip');
+    SELECT cozip_integrity_hash_ok('test/data/flat_store_6files.cozip');
+  extended_description: |
+    cozip is a ZIP-compatible layout that places a compact binary index in the first entry
+    (__cozip__) so readers can locate priority files without scanning the Central Directory first.
+    This extension validates the current cozip core format, checks the FNV-1a integrity hash over
+    the index payload and archive tail, and exposes the priority index through scalar functions and
+    the cozip_index(path) table function.

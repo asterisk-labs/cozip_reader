@@ -1,11 +1,12 @@
-# Testing this extension
-This directory contains all the tests for this extension. The `sql` directory holds tests that are written as [SQLLogicTests](https://duckdb.org/dev/sqllogictest/intro.html). DuckDB aims to have most its tests in this format as SQL statements, so for the quack extension, this should probably be the goal too.
+# Testing cozip
 
-The root makefile contains targets to build and run all of these tests. To run the SQLLogicTests:
-```bash
-make test
+The `sql` directory contains SQLLogicTests for the DuckDB extension.
+
+On Windows, after configuring CMake, run:
+
+```powershell
+.\build\release\test\MinSizeRel\unittest.exe --test-dir . "test/sql/cozip.test"
 ```
-or 
-```bash
-make test_debug
-```
+
+The current fixture in `test/data/flat_store_6files.cozip` follows the
+cozip 1.0 FLAT profile produced by the writer in the sibling `taco` project.
