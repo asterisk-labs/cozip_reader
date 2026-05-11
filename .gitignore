@@ -20,3 +20,9 @@ notebooks/
 
 src/cozip_extension_old.cpp
 test/sql/cozip_old.test
+
+.cache/
+bundle.sh
+bundle.txt
+*.bak
+*.bak2

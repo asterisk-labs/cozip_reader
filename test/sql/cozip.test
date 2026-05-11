@@ -1,45 +1,96 @@
-# name: test/sql/cozip.test
-# description: test cozip reader extension
-# group: [sql]
-
-statement error
-SELECT cozip_priority_count('test/data/flat_store_6files.cozip');
-----
-Catalog Error: Scalar Function with name cozip_priority_count does not exist!
-
-statement error
-SELECT * FROM cozip_index('test/data/flat_store_6files.cozip');
-----
-Catalog Error: Table Function with name cozip_index does not exist!
+# read_cozip against the flat_simple and flat_geo fixtures in test/data/
 
 require cozip
 
-query III
-SELECT
-  cozip_priority_count('test/data/flat_store_6files.cozip'),
-  cozip_profile('test/data/flat_store_6files.cozip'),
-  cozip_metadata_offset('test/data/flat_store_6files.cozip');
-----
-1	1	246212
 
-query II
-SELECT
-  cozip_integrity_hash_ok('test/data/flat_store_6files.cozip')::INTEGER,
-  cozip_tail_hash_ok('test/data/flat_store_6files.cozip')::INTEGER;
-----
-1	1
+# ---- flat_simple ----------------------------------------------------------
 
-query ITII
-SELECT ordinal, name, offset_bytes, size_bytes
-FROM cozip_index('test/data/flat_store_6files.cozip')
-ORDER BY ordinal;
-----
-0	__metadata__	246212	3201
-
+# The simple fixture packs 4 inner files.
 query I
-SELECT (
-  cozip_index_json('test/data/flat_store_6files.cozip') =
-  '{"version":1,"profile":1,"index_payload_size":41,"integrity_hash_ok":true,"entries":[{"name":"__metadata__","offset":246212,"size":3201}]}'
-)::INTEGER;
+SELECT count(*) FROM read_cozip('test/data/flat_simple.cozip');
 ----
-1
+4
+
+# Plain columns (without the VSI column): name and a user-supplied
+# category column come from the embedded metadata Parquet.
+query TT
+SELECT "name", "category"
+FROM read_cozip('test/data/flat_simple.cozip', gdal_vsi := false)
+ORDER BY "name";
+----
+denver.txt	text
+lima.txt	text
+paris.txt	text
+tokyo.txt	text
+
+# offset and size are uint64 and behave like numbers.
+query II
+SELECT count(*) AS n_rows, sum("size") > 0 AS payload_present
+FROM read_cozip('test/data/flat_simple.cozip', gdal_vsi := false);
+----
+4	true
+
+# Offsets are strictly increasing across rows (the writer packs sequentially).
+query I
+SELECT bool_and("offset" > prev) AS strictly_increasing
+FROM (
+  SELECT "offset", LAG("offset") OVER (ORDER BY "offset") AS prev
+  FROM read_cozip('test/data/flat_simple.cozip', gdal_vsi := false)
+) sub
+WHERE prev IS NOT NULL;
+----
+true
+
+# With gdal_vsi := true (default) an extra cozip:gdal_vsi column is
+# present, every value starts with /vsisubfile/, and the suffix is the
+# original archive path.
+query I
+SELECT count(*)
+FROM read_cozip('test/data/flat_simple.cozip')
+WHERE "cozip:gdal_vsi" LIKE '/vsisubfile/%,test/data/flat_simple.cozip';
+----
+4
+
+
+# ---- flat_geo -------------------------------------------------------------
+
+# Same 4 rows, GeoParquet metadata.
+query I
+SELECT count(*) FROM read_cozip('test/data/flat_geo.cozip');
+----
+4
+
+# The geometry column survives the cozip embedding and arrives as a
+# non-empty WKB blob in every row.
+query I
+SELECT count(*)
+FROM read_cozip('test/data/flat_geo.cozip', gdal_vsi := false)
+WHERE octet_length("geometry") > 0;
+----
+4
+
+# The user-supplied columns coexist with geometry.
+query TT
+SELECT "name", "category"
+FROM read_cozip('test/data/flat_geo.cozip', gdal_vsi := false)
+ORDER BY "name";
+----
+denver.txt	text
+lima.txt	text
+paris.txt	text
+tokyo.txt	text
+
+
+# ---- error paths ----------------------------------------------------------
+
+# NULL path is rejected at bind time.
+statement error
+SELECT * FROM read_cozip(NULL);
+----
+read_cozip path cannot be NULL
+
+# A small non-cozip file trips the minimum-size guard before the LFH check.
+statement error
+SELECT * FROM read_cozip('test/sql/cozip.test');
+----
+cozip archive too small
