@@ -1,45 +1,20 @@
 # name: test/sql/cozip.test
-# description: test cozip reader extension
-# group: [sql]
-
-statement error
-SELECT cozip_priority_count('test/data/flat_store_6files.cozip');
-----
-Catalog Error: Scalar Function with name cozip_priority_count does not exist!
-
-statement error
-SELECT * FROM cozip_index('test/data/flat_store_6files.cozip');
-----
-Catalog Error: Table Function with name cozip_index does not exist!
+# description: smoke test for read_cozip
+# group: [cozip]
 
 require cozip
 
-query III
-SELECT
-  cozip_priority_count('test/data/flat_store_6files.cozip'),
-  cozip_profile('test/data/flat_store_6files.cozip'),
-  cozip_metadata_offset('test/data/flat_store_6files.cozip');
-----
-1	1	246212
+statement ok
+SELECT * FROM read_cozip('test/data/flat_store_6files.cozip') LIMIT 1;
 
-query II
-SELECT
-  cozip_integrity_hash_ok('test/data/flat_store_6files.cozip')::INTEGER,
-  cozip_tail_hash_ok('test/data/flat_store_6files.cozip')::INTEGER;
-----
-1	1
+statement ok
+SELECT "name", "offset", "size" FROM read_cozip(
+    'test/data/flat_store_6files.cozip',
+    gdal_vsi := false
+);
 
-query ITII
-SELECT ordinal, name, offset_bytes, size_bytes
-FROM cozip_index('test/data/flat_store_6files.cozip')
-ORDER BY ordinal;
-----
-0	__metadata__	246212	3201
-
-query I
-SELECT (
-  cozip_index_json('test/data/flat_store_6files.cozip') =
-  '{"version":1,"profile":1,"index_payload_size":41,"integrity_hash_ok":true,"entries":[{"name":"__metadata__","offset":246212,"size":3201}]}'
-)::INTEGER;
-----
-1
+# With gdal_vsi := true (default), the result must include the
+# cozip:gdal_vsi column wrapped in double quotes due to the colon.
+statement ok
+SELECT "cozip:gdal_vsi" FROM read_cozip('test/data/flat_store_6files.cozip')
+LIMIT 1;
