@@ -23,16 +23,15 @@ import pyarrow as pa
 
 import cozip
 
-
 THIS_DIR = Path(__file__).resolve().parent
 DATA_DIR = THIS_DIR / "data"
 
 # 4 cities, each file roughly 10 KB so the archive clears the cozip
 # minimum without padding tricks.
 CITIES = [
-    ("lima.txt",   "Lima, Peru. 12 S, 77 W.\n",        -77.04, -12.05),
-    ("paris.txt",  "Paris, France. 48 N, 2 E.\n",        2.35,  48.86),
-    ("tokyo.txt",  "Tokyo, Japan. 35 N, 139 E.\n",     139.69,  35.69),
+    ("lima.txt", "Lima, Peru. 12 S, 77 W.\n", -77.04, -12.05),
+    ("paris.txt", "Paris, France. 48 N, 2 E.\n", 2.35, 48.86),
+    ("tokyo.txt", "Tokyo, Japan. 35 N, 139 E.\n", 139.69, 35.69),
     ("denver.txt", "Denver, Colorado. 39 N, 104 W.\n", -104.99, 39.74),
 ]
 
@@ -53,11 +52,13 @@ def build_simple(out_path: Path, name_path_pairs: list[tuple[str, str]]) -> None
     """Plain flat cozip. cozip.create handles staging and packing in one call."""
     names = [n for n, _ in name_path_pairs]
     paths = [p for _, p in name_path_pairs]
-    table = pa.table({
-        "name":     names,
-        "path":     paths,
-        "category": ["text"] * len(names),
-    })
+    table = pa.table(
+        {
+            "name": names,
+            "path": paths,
+            "category": ["text"] * len(names),
+        }
+    )
     cozip.create(out_path, table)
 
 
@@ -75,11 +76,13 @@ def build_geo(
     paths = [p for _, p in name_path_pairs]
     points = [Point(lon, lat) for _, _, lon, lat in CITIES]
 
-    src_table = pa.table({
-        "name":     names,
-        "path":     paths,
-        "category": ["text"] * len(names),
-    })
+    src_table = pa.table(
+        {
+            "name": names,
+            "path": paths,
+            "category": ["text"] * len(names),
+        }
+    )
 
     meta_arrow, staged_paths = cozip.stage_metadata(src_table)
     gdf = gpd.GeoDataFrame(
@@ -103,13 +106,11 @@ def main() -> None:
 
         simple_out = DATA_DIR / "flat_simple.cozip"
         build_simple(simple_out, inputs)
-        print(f"wrote {simple_out.relative_to(THIS_DIR.parent)} "
-              f"({simple_out.stat().st_size} bytes)")
+        print(f"wrote {simple_out.relative_to(THIS_DIR.parent)} " f"({simple_out.stat().st_size} bytes)")
 
         geo_out = DATA_DIR / "flat_geo.cozip"
         build_geo(geo_out, inputs, tmp_root)
-        print(f"wrote {geo_out.relative_to(THIS_DIR.parent)} "
-              f"({geo_out.stat().st_size} bytes)")
+        print(f"wrote {geo_out.relative_to(THIS_DIR.parent)} " f"({geo_out.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":

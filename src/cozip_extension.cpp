@@ -45,19 +45,19 @@
 
 namespace duckdb {
 
-static constexpr uint32_t ZIP_LFH_SIGNATURE       = 0x04034B50U;
-static constexpr idx_t    COZIP_LFH_SIZE          = 51;
-static constexpr idx_t    COZIP_INDEX_HEADER_SIZE = 11;
-static constexpr idx_t    COZIP_HASH_WINDOW_SIZE  = 32768;
-static constexpr idx_t    COZIP_MIN_SIZE          = COZIP_LFH_SIZE + COZIP_HASH_WINDOW_SIZE;
-static constexpr idx_t    COZIP_BOOTSTRAP_SIZE    = 65536;
-static constexpr uint16_t COZIP_EXTRA_HEADER_ID   = 0xCA0C;
-static constexpr uint8_t  COZIP_PROFILE_FLAT      = 1;
-static constexpr uint16_t COZIP_FORMAT_VERSION    = 1;
+static constexpr uint32_t ZIP_LFH_SIGNATURE = 0x04034B50U;
+static constexpr idx_t COZIP_LFH_SIZE = 51;
+static constexpr idx_t COZIP_INDEX_HEADER_SIZE = 11;
+static constexpr idx_t COZIP_HASH_WINDOW_SIZE = 32768;
+static constexpr idx_t COZIP_MIN_SIZE = COZIP_LFH_SIZE + COZIP_HASH_WINDOW_SIZE;
+static constexpr idx_t COZIP_BOOTSTRAP_SIZE = 65536;
+static constexpr uint16_t COZIP_EXTRA_HEADER_ID = 0xCA0C;
+static constexpr uint8_t COZIP_PROFILE_FLAT = 1;
+static constexpr uint16_t COZIP_FORMAT_VERSION = 1;
 
-static const std::string COZIP_INDEX_NAME    = "__cozip__";
+static const std::string COZIP_INDEX_NAME = "__cozip__";
 static const std::string COZIP_METADATA_NAME = "__metadata__";
-static const std::string COZIP_VSI_COLUMN    = "cozip:gdal_vsi";
+static const std::string COZIP_VSI_COLUMN = "cozip:gdal_vsi";
 
 static inline uint16_t ReadU16LE(const uint8_t *p) {
 	return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -88,7 +88,7 @@ static CozipMetadataEntry ParseCozipMetadataLocation(FileHandle &handle, const s
 	if (ReadU32LE(head.data()) != ZIP_LFH_SIGNATURE) {
 		throw InvalidInputException("byte 0 is not a ZIP Local File Header: %s", source);
 	}
-	auto name_len  = ReadU16LE(head.data() + 26);
+	auto name_len = ReadU16LE(head.data() + 26);
 	auto extra_len = ReadU16LE(head.data() + 28);
 	if (name_len != 9 || extra_len != 12) {
 		throw InvalidInputException("LFH does not match cozip layout: %s", source);
@@ -123,8 +123,8 @@ static CozipMetadataEntry ParseCozipMetadataLocation(FileHandle &handle, const s
 	}
 	auto profile = pp[6];
 	if (profile != COZIP_PROFILE_FLAT) {
-		throw InvalidInputException(
-		    "read_cozip only supports the Flat profile (profile=1). Got profile=%d in: %s", (int)profile, source);
+		throw InvalidInputException("read_cozip only supports the Flat profile (profile=1). Got profile=%d in: %s",
+		                            (int)profile, source);
 	}
 	auto n_entries = (idx_t)ReadU32LE(pp + 7);
 
@@ -152,7 +152,7 @@ static CozipMetadataEntry ParseCozipMetadataLocation(FileHandle &handle, const s
 
 	for (idx_t i = 0; i < n_entries; i++) {
 		if (names[i] == COZIP_METADATA_NAME) {
-			return CozipMetadataEntry{offsets[i], sizes[i]};
+			return CozipMetadataEntry {offsets[i], sizes[i]};
 		}
 	}
 	throw InvalidInputException("Flat-profile cozip is missing __metadata__ entry: %s", source);
@@ -184,10 +184,10 @@ static std::string BuildVsiBase(const std::string &path) {
 		std::string ns_prefix;
 		if (StringUtil::StartsWith(rest, "datasets/")) {
 			ns_prefix = "datasets/";
-			rest      = rest.substr(9);
+			rest = rest.substr(9);
 		} else if (StringUtil::StartsWith(rest, "spaces/")) {
 			ns_prefix = "spaces/";
-			rest      = rest.substr(7);
+			rest = rest.substr(7);
 		}
 		auto sl1 = rest.find('/');
 		auto sl2 = (sl1 == std::string::npos) ? std::string::npos : rest.find('/', sl1 + 1);
@@ -195,7 +195,7 @@ static std::string BuildVsiBase(const std::string &path) {
 			throw InvalidInputException("cannot parse hf:// URL for VSI mapping: %s", path);
 		}
 		auto owner_repo = rest.substr(0, sl2);
-		auto inner      = rest.substr(sl2 + 1);
+		auto inner = rest.substr(sl2 + 1);
 		return "/vsicurl/https://huggingface.co/" + ns_prefix + owner_repo + "/resolve/main/" + inner;
 	}
 	return path;
@@ -211,9 +211,9 @@ struct ReadCozipBindData : public TableFunctionData {
 	bool with_gdal_vsi = true;
 
 	vector<LogicalType> parquet_types;
-	vector<string>      parquet_names;
+	vector<string> parquet_names;
 	idx_t offset_col_idx = DConstants::INVALID_INDEX;
-	idx_t size_col_idx   = DConstants::INVALID_INDEX;
+	idx_t size_col_idx = DConstants::INVALID_INDEX;
 
 	unique_ptr<ParquetReader> reader;
 
@@ -246,7 +246,7 @@ static unique_ptr<FunctionData> ReadCozipBind(ClientContext &context, TableFunct
 	}
 	auto path = StringValue::Get(input.inputs[0]);
 
-	auto bind_data  = make_uniq<ReadCozipBindData>();
+	auto bind_data = make_uniq<ReadCozipBindData>();
 	bind_data->path = path;
 
 	for (auto &kv : input.named_parameters) {
@@ -256,7 +256,7 @@ static unique_ptr<FunctionData> ReadCozipBind(ClientContext &context, TableFunct
 		}
 	}
 
-	auto &fs    = FileSystem::GetFileSystem(context);
+	auto &fs = FileSystem::GetFileSystem(context);
 	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
 	if (!handle) {
 		throw IOException("could not open cozip archive: %s", path);
@@ -273,7 +273,7 @@ static unique_ptr<FunctionData> ReadCozipBind(ClientContext &context, TableFunct
 	if (tmp_dir.empty()) {
 		tmp_dir = ".";
 	}
-	auto tmp_name = "cozip_md_" + std::to_string((uint64_t)reinterpret_cast<uintptr_t>(bind_data.get())) + ".parquet";
+	auto tmp_name = "cozip_md_" + std::to_string((uint64_t) reinterpret_cast<uintptr_t>(bind_data.get())) + ".parquet";
 	bind_data->temp_parquet_path = fs.JoinPath(tmp_dir, tmp_name);
 
 	{
@@ -299,7 +299,7 @@ static unique_ptr<FunctionData> ReadCozipBind(ClientContext &context, TableFunct
 	}
 
 	return_types = bind_data->parquet_types;
-	names        = bind_data->parquet_names;
+	names = bind_data->parquet_names;
 
 	for (idx_t i = 0; i < bind_data->parquet_names.size(); i++) {
 		if (bind_data->parquet_names[i] == "offset") {
@@ -312,9 +312,8 @@ static unique_ptr<FunctionData> ReadCozipBind(ClientContext &context, TableFunct
 	if (bind_data->with_gdal_vsi) {
 		if (bind_data->offset_col_idx == DConstants::INVALID_INDEX ||
 		    bind_data->size_col_idx == DConstants::INVALID_INDEX) {
-			throw InvalidInputException(
-			    "__metadata__ Parquet missing required 'offset' and/or 'size' columns "
-			    "(needed to build cozip:gdal_vsi). Set gdal_vsi := false to skip.");
+			throw InvalidInputException("__metadata__ Parquet missing required 'offset' and/or 'size' columns "
+			                            "(needed to build cozip:gdal_vsi). Set gdal_vsi := false to skip.");
 		}
 		bind_data->vsi_base = BuildVsiBase(path);
 		return_types.push_back(LogicalType::VARCHAR);
@@ -326,7 +325,7 @@ static unique_ptr<FunctionData> ReadCozipBind(ClientContext &context, TableFunct
 
 static unique_ptr<GlobalTableFunctionState> ReadCozipInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<ReadCozipBindData>();
-	auto state      = make_uniq<ReadCozipGlobalState>();
+	auto state = make_uniq<ReadCozipGlobalState>();
 	state->parquet_column_count = bind_data.parquet_types.size();
 
 	// Initialize the staging chunk here so its buffers outlive each scan
@@ -348,7 +347,7 @@ static unique_ptr<GlobalTableFunctionState> ReadCozipInit(ClientContext &context
 
 static void ReadCozipFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<ReadCozipBindData>();
-	auto &gstate    = data_p.global_state->Cast<ReadCozipGlobalState>();
+	auto &gstate = data_p.global_state->Cast<ReadCozipGlobalState>();
 
 	auto &staging = *gstate.staging;
 
@@ -375,17 +374,17 @@ static void ReadCozipFunction(ClientContext &context, TableFunctionInput &data_p
 
 	if (bind_data.with_gdal_vsi) {
 		auto &offset_vec = staging.data[bind_data.offset_col_idx];
-		auto &size_vec   = staging.data[bind_data.size_col_idx];
+		auto &size_vec = staging.data[bind_data.size_col_idx];
 		offset_vec.Flatten(row_count);
 		size_vec.Flatten(row_count);
 		auto offsets = FlatVector::GetData<uint64_t>(offset_vec);
-		auto sizes   = FlatVector::GetData<uint64_t>(size_vec);
+		auto sizes = FlatVector::GetData<uint64_t>(size_vec);
 
 		auto &out_vec = output.data[gstate.parquet_column_count];
 		auto out_data = FlatVector::GetData<string_t>(out_vec);
 		for (idx_t r = 0; r < row_count; r++) {
-			auto s = "/vsisubfile/" + std::to_string(offsets[r]) + "_" + std::to_string(sizes[r]) + "," +
-			         bind_data.vsi_base;
+			auto s =
+			    "/vsisubfile/" + std::to_string(offsets[r]) + "_" + std::to_string(sizes[r]) + "," + bind_data.vsi_base;
 			out_data[r] = StringVector::AddString(out_vec, s);
 		}
 	}

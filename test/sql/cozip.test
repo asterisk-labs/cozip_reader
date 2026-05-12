@@ -1,3 +1,6 @@
+# name: test/sql/cozip.test
+# group: [sql]
+
 # read_cozip against the flat_simple and flat_geo fixtures in test/data/
 
 require cozip
