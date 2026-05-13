@@ -9,8 +9,10 @@
 // is a CZIP-magic index that lists every priority entry with absolute
 // byte offset and size. The Flat profile places a Parquet file named
 // __metadata__ as one of those entries; read_cozip locates it through
-// the index, pulls its bytes via DuckDB's FileSystem layer, and hands
-// them to ParquetReader.
+// the index and hands its byte range to ParquetReader via the internal
+// cozip-subfile:// virtual filesystem, so the Parquet bytes are read
+// lazily through DuckDB's FileSystem layer (httpfs, hf, s3, local)
+// without any intermediate buffering or temp files.
 //
 // Because we open the archive through FileSystem::GetFileSystem, local
 // paths, http/https/s3/gs/r2 (httpfs is autoloaded), and azure/hf (their
@@ -26,6 +28,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "cozip_extension.hpp"
+#include "cozip_subfile_fs.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
@@ -38,7 +41,6 @@
 // From the parquet extension, statically linked via CMakeLists.txt.
 #include "parquet_reader.hpp"
 
-#include <cstdio>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -201,13 +203,13 @@ static std::string BuildVsiBase(const std::string &path) {
 	return path;
 }
 
-// The ParquetReader lives in BindData because it owns the file handle to the
-// temp parquet and the parsed Parquet metadata. ScanState is per-init and
-// lives in GlobalState.
+// The ParquetReader lives in BindData because it owns the FileHandle returned
+// by CozipSubFileSystem (which in turn wraps the underlying archive handle)
+// plus the parsed Parquet metadata. ScanState is per-init and lives in
+// GlobalState.
 struct ReadCozipBindData : public TableFunctionData {
 	std::string path;
 	std::string vsi_base;
-	std::string temp_parquet_path;
 	bool with_gdal_vsi = true;
 
 	vector<LogicalType> parquet_types;
@@ -216,16 +218,6 @@ struct ReadCozipBindData : public TableFunctionData {
 	idx_t size_col_idx = DConstants::INVALID_INDEX;
 
 	unique_ptr<ParquetReader> reader;
-
-	~ReadCozipBindData() override {
-		// Release the parquet reader first so the file handle is closed
-		// before we try to remove the file (matters on Windows, no-op
-		// elsewhere). std::remove is best-effort and never throws.
-		reader.reset();
-		if (!temp_parquet_path.empty()) {
-			std::remove(temp_parquet_path.c_str());
-		}
-	}
 };
 
 struct ReadCozipGlobalState : public GlobalTableFunctionState {
@@ -256,34 +248,34 @@ static unique_ptr<FunctionData> ReadCozipBind(ClientContext &context, TableFunct
 		}
 	}
 
+	// Parse the cozip index by opening a short-lived bootstrap handle.
+	// We only need it to discover the byte range of the __metadata__
+	// Parquet entry; the actual Parquet reads happen later through
+	// ParquetReader via the cozip-subfile:// virtual path. The bootstrap
+	// handle is dropped at the end of this scope so the connection it
+	// holds can be reused or released before ParquetReader opens its own.
 	auto &fs = FileSystem::GetFileSystem(context);
-	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-	if (!handle) {
-		throw IOException("could not open cozip archive: %s", path);
-	}
-
-	auto md = ParseCozipMetadataLocation(*handle, path);
-
-	// Pull the __metadata__ Parquet payload into RAM and persist it as a
-	// temp file so ParquetReader can open it by path.
-	std::vector<uint8_t> parquet_buf(md.size);
-	handle->Read(parquet_buf.data(), md.size, md.offset);
-
-	auto tmp_dir = fs.GetHomeDirectory();
-	if (tmp_dir.empty()) {
-		tmp_dir = ".";
-	}
-	auto tmp_name = "cozip_md_" + std::to_string((uint64_t) reinterpret_cast<uintptr_t>(bind_data.get())) + ".parquet";
-	bind_data->temp_parquet_path = fs.JoinPath(tmp_dir, tmp_name);
-
+	CozipMetadataEntry md;
 	{
-		auto tmp_handle =
-		    fs.OpenFile(bind_data->temp_parquet_path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE);
-		tmp_handle->Write(parquet_buf.data(), parquet_buf.size());
+		auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+		if (!handle) {
+			throw IOException("could not open cozip archive: %s", path);
+		}
+		md = ParseCozipMetadataLocation(*handle, path);
 	}
+
+	// Build a virtual path that, when opened by ParquetReader, will be
+	// intercepted by CozipSubFileSystem and resolved to a FileHandle that
+	// exposes only the bytes [md.offset, md.offset + md.size) of the
+	// archive. ParquetReader sees what looks like a standalone Parquet
+	// file of md.size bytes and issues range requests against it; those
+	// requests are translated to range requests against the underlying
+	// archive, so reads remain lazy and no temp file is ever written.
+	auto virtual_path = StringUtil::Format("cozip-subfile://%llu_%llu!%s", (unsigned long long)md.offset,
+	                                       (unsigned long long)md.size, path);
 
 	ParquetOptions parquet_options(context);
-	bind_data->reader = make_uniq<ParquetReader>(context, OpenFileInfo(bind_data->temp_parquet_path), parquet_options);
+	bind_data->reader = make_uniq<ParquetReader>(context, OpenFileInfo(virtual_path), parquet_options);
 
 	for (auto &col : bind_data->reader->columns) {
 		bind_data->parquet_names.push_back(col.name);
@@ -391,6 +383,13 @@ static void ReadCozipFunction(ClientContext &context, TableFunctionInput &data_p
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
+	// Register the internal cozip-subfile:// FileSystem first, so that by
+	// the time read_cozip's bind constructs a cozip-subfile:// virtual
+	// path and hands it to ParquetReader, the VFS already knows how to
+	// dispatch it.
+	auto &fs = loader.GetDatabaseInstance().GetFileSystem();
+	fs.RegisterSubSystem(make_uniq<CozipSubFileSystem>());
+
 	TableFunction read_cozip("read_cozip", {LogicalType::VARCHAR}, ReadCozipFunction, ReadCozipBind, ReadCozipInit);
 	read_cozip.named_parameters["gdal_vsi"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(read_cozip);
