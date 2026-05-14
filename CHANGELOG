@@ -1,0 +1,25 @@
+# Changelog
+
+## v1.2.0 — 2026-05-14
+
+### Fixed
+- WebAssembly (`wasm_eh`): `read_cozip(url)` returned memory corruption
+  in `shell.duckdb.org`. Direct C++ construction of `ParquetReader` from
+  cozip pulled template instantiations not exported by `duckdb-wasm` side
+  modules; the dynamic linker resolved them to stubs returning 0, and the
+  resulting null dereference leaked low linear memory into query results.
+  Refactored `read_cozip` to a SQL table macro composing `read_parquet`
+  over the existing `cozip-subfile://` VFS.
+
+### Changed
+- `read_cozip` is now a SQL table macro (was a C++ TableFunction). The
+  user-facing API is unchanged: `SELECT * FROM read_cozip(p, gdal_vsi := ...)`.
+- Geometry columns from GeoParquet sources arrive typed as `GEOMETRY` with
+  CRS metadata, instead of raw `BLOB`. This follows `read_parquet`'s
+  behaviour, which the new macro path goes through.
+- `read_cozip(NULL)` now surfaces as a Parser Error mentioning
+  `read_parquet`, since NULL propagates through the macro body before any
+  cozip-level scalar runs (was a custom bind-time error).
+- `parquet` is now a runtime dependency. Default DuckDB and `duckdb-wasm`
+  builds autoload it transparently; embedded harnesses with autoload
+  disabled must `LOAD parquet` explicitly.

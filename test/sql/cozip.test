@@ -1,22 +1,18 @@
 # name: test/sql/cozip.test
 # group: [sql]
 
-#
-# read_cozip against the flat_simple and flat_geo fixtures in test/data/
-
 require cozip
 
+require parquet
 
-# ---- flat_simple ----------------------------------------------------------
 
-# The simple fixture packs 4 inner files.
+# flat_simple
+
 query I
 SELECT count(*) FROM read_cozip('test/data/flat_simple.cozip');
 ----
 4
 
-# Plain columns (without the VSI column): name and a user-supplied
-# category column come from the embedded metadata Parquet.
 query TT
 SELECT "name", "category" FROM read_cozip('test/data/flat_simple.cozip', gdal_vsi := false)
 ORDER BY "name";
@@ -26,47 +22,39 @@ lima.txt	text
 paris.txt	text
 tokyo.txt	text
 
-# offset and size are uint64 and behave like numbers.
 query II
-SELECT count(*) AS n_rows, sum("size") > 0 AS payload_present
+SELECT count(*), sum("size") > 0
 FROM read_cozip('test/data/flat_simple.cozip', gdal_vsi := false);
 ----
 4	true
 
-# Offsets are strictly increasing across rows (the writer packs sequentially).
 query I
-SELECT bool_and("offset" > prev) AS strictly_increasing FROM (
+SELECT bool_and("offset" > prev) FROM (
   SELECT "offset", LAG("offset") OVER (ORDER BY "offset") AS prev
   FROM read_cozip('test/data/flat_simple.cozip', gdal_vsi := false)
-) sub
+) t
 WHERE prev IS NOT NULL;
 ----
 true
 
-# With gdal_vsi := true (default) an extra cozip:gdal_vsi column is
-# present, every value starts with /vsisubfile/, and the suffix is the
-# original archive path.
 query I
 SELECT count(*) FROM read_cozip('test/data/flat_simple.cozip')
 WHERE "cozip:gdal_vsi" LIKE '/vsisubfile/%,test/data/flat_simple.cozip';
 ----
 4
 
-# The VSI offset_size segment exactly mirrors the offset and size columns.
 query I
 SELECT count(*) FROM read_cozip('test/data/flat_simple.cozip')
 WHERE "cozip:gdal_vsi" = '/vsisubfile/' || "offset"::VARCHAR || '_' || "size"::VARCHAR || ',test/data/flat_simple.cozip';
 ----
 4
 
-# A local archive resolves to itself, not through /vsicurl/.
 query I
 SELECT count(*) FROM read_cozip('test/data/flat_simple.cozip')
 WHERE "cozip:gdal_vsi" LIKE '%/vsicurl/%';
 ----
 0
 
-# Two consecutive scans return the same rows.
 query III nosort same_rows
 SELECT "name", "offset", "size" FROM read_cozip('test/data/flat_simple.cozip', gdal_vsi := false)
 ORDER BY "name";
@@ -78,23 +66,20 @@ ORDER BY "name";
 ----
 
 
-# ---- flat_geo -------------------------------------------------------------
+# flat_geo
+# geometry comes back as GEOMETRY — read_parquet honours GeoParquet metadata
 
-# Same 4 rows, GeoParquet metadata.
 query I
 SELECT count(*) FROM read_cozip('test/data/flat_geo.cozip');
 ----
 4
 
-# The geometry column survives the cozip embedding and arrives as a
-# non-empty WKB blob in every row.
 query I
 SELECT count(*) FROM read_cozip('test/data/flat_geo.cozip', gdal_vsi := false)
-WHERE octet_length("geometry") > 0;
+WHERE "geometry" IS NOT NULL;
 ----
 4
 
-# The user-supplied columns coexist with geometry.
 query TT
 SELECT "name", "category" FROM read_cozip('test/data/flat_geo.cozip', gdal_vsi := false)
 ORDER BY "name";
@@ -104,7 +89,6 @@ lima.txt	text
 paris.txt	text
 tokyo.txt	text
 
-# Joining cozip output against a temp table works like any other table function.
 statement ok
 CREATE TEMP TABLE want(name VARCHAR);
 
@@ -120,22 +104,18 @@ lima.txt
 tokyo.txt
 
 
-# ---- error paths ----------------------------------------------------------
+# errors
 
-# NULL path is rejected at bind time.
 statement error
 SELECT * FROM read_cozip(NULL);
 ----
-read_cozip path cannot be NULL
+cannot take NULL
 
-# A small non-cozip file trips the minimum-size guard before the LFH check.
 statement error
 SELECT * FROM read_cozip('test/sql/cozip.test');
 ----
 cozip archive too small
 
-# A non-existing path surfaces as an IO error from the underlying filesystem,
-# raised by fs.OpenFile before the cozip bind ever sees the handle.
 statement error
 SELECT * FROM read_cozip('test/data/does_not_exist.cozip');
 ----
