@@ -1,29 +1,10 @@
-// cozip extension for DuckDB.
+// read_cozip table macro: composes read_parquet over a cozip-subfile://
+// virtual path resolved by CozipSubFileSystem. Plus two scalar helpers
+// (cozip_offset_size, cozip_vsi_base) used by the macro body.
 //
-// Exposes a single table function, read_cozip(path), that opens a
-// Cloud-Optimized ZIP archive and returns its embedded __metadata__
-// Parquet as a regular DuckDB table.
-//
-// A cozip archive is a valid ZIP whose first entry, __cozip__, has a
-// fixed 51-byte Local File Header. Its payload, starting at byte 51,
-// is a CZIP-magic index that lists every priority entry with absolute
-// byte offset and size. The Flat profile places a Parquet file named
-// __metadata__ as one of those entries; read_cozip locates it through
-// the index and hands its byte range to ParquetReader via the internal
-// cozip-subfile:// virtual filesystem, so the Parquet bytes are read
-// lazily through DuckDB's FileSystem layer (httpfs, hf, s3, local)
-// without any intermediate buffering or temp files.
-//
-// Because we open the archive through FileSystem::GetFileSystem, local
-// paths, http/https/s3/gs/r2 (httpfs is autoloaded), and azure/hf (their
-// extensions are autoloaded if installed) all work transparently.
-//
-// Each returned row also gets a cozip:gdal_vsi column with a
-// /vsisubfile/offset_size,/vsi.../ path that opens the referenced inner
-// file directly in GDAL without re-downloading the archive.
-// Pass gdal_vsi := false to drop that column.
-//
-// The cozip 1.0 spec lives at github.com/asterisk-labs/taco/cozip.
+// WASM side-module constraint: avoid template paths whose instantiations
+// duckdb-eh.wasm does not export — single-string throws, FlatVector loops
+// (not UnaryExecutor), Parser+RegisterFunction (not Connection::Query).
 
 #define DUCKDB_EXTENSION_MAIN
 
@@ -34,15 +15,15 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/types/value.hpp"
-#include "duckdb/function/table_function.hpp"
-#include "duckdb/main/extension_helper.hpp"
-
-// From the parquet extension, statically linked via CMakeLists.txt.
-#include "parquet_reader.hpp"
+#include "duckdb/common/types/vector.hpp"
+#include "duckdb/function/scalar_function.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/parser/parser.hpp"
+#include "duckdb/parser/parsed_data/create_macro_info.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
 
 #include <cstring>
-#include <utility>
+#include <string>
 #include <vector>
 
 namespace duckdb {
@@ -59,7 +40,6 @@ static constexpr uint16_t COZIP_FORMAT_VERSION = 1;
 
 static const std::string COZIP_INDEX_NAME = "__cozip__";
 static const std::string COZIP_METADATA_NAME = "__metadata__";
-static const std::string COZIP_VSI_COLUMN = "cozip:gdal_vsi";
 
 static inline uint16_t ReadU16LE(const uint8_t *p) {
 	return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -79,8 +59,8 @@ struct CozipMetadataEntry {
 static CozipMetadataEntry ParseCozipMetadataLocation(FileHandle &handle, const std::string &source) {
 	auto file_size = (idx_t)handle.GetFileSize();
 	if (file_size < COZIP_MIN_SIZE) {
-		throw InvalidInputException("cozip archive too small (minimum is %llu bytes): %s",
-		                            (unsigned long long)COZIP_MIN_SIZE, source);
+		throw InvalidInputException(std::string("cozip archive too small (minimum is ") +
+		                            std::to_string(COZIP_MIN_SIZE) + " bytes): " + source);
 	}
 
 	auto bootstrap = std::min<idx_t>(COZIP_BOOTSTRAP_SIZE, file_size);
@@ -88,23 +68,23 @@ static CozipMetadataEntry ParseCozipMetadataLocation(FileHandle &handle, const s
 	handle.Read(head.data(), bootstrap, 0);
 
 	if (ReadU32LE(head.data()) != ZIP_LFH_SIGNATURE) {
-		throw InvalidInputException("byte 0 is not a ZIP Local File Header: %s", source);
+		throw InvalidInputException(std::string("byte 0 is not a ZIP Local File Header: ") + source);
 	}
 	auto name_len = ReadU16LE(head.data() + 26);
 	auto extra_len = ReadU16LE(head.data() + 28);
 	if (name_len != 9 || extra_len != 12) {
-		throw InvalidInputException("LFH does not match cozip layout: %s", source);
+		throw InvalidInputException(std::string("LFH does not match cozip layout: ") + source);
 	}
 	if (memcmp(head.data() + 30, COZIP_INDEX_NAME.data(), 9) != 0) {
-		throw InvalidInputException("first ZIP entry is not __cozip__: %s", source);
+		throw InvalidInputException(std::string("first ZIP entry is not __cozip__: ") + source);
 	}
 	if (ReadU16LE(head.data() + 39) != COZIP_EXTRA_HEADER_ID) {
-		throw InvalidInputException("cozip integrity extra field (0xCA0C) missing: %s", source);
+		throw InvalidInputException(std::string("cozip integrity extra field (0xCA0C) missing: ") + source);
 	}
 
 	auto index_payload_size = (idx_t)ReadU32LE(head.data() + 18);
 	if (index_payload_size == 0) {
-		throw InvalidInputException("cozip index payload size is zero: %s", source);
+		throw InvalidInputException(std::string("cozip index payload size is zero: ") + source);
 	}
 	auto index_payload_end = COZIP_LFH_SIZE + index_payload_size;
 
@@ -117,16 +97,17 @@ static CozipMetadataEntry ParseCozipMetadataLocation(FileHandle &handle, const s
 
 	auto pp = head.data() + COZIP_LFH_SIZE;
 	if (memcmp(pp, "CZIP", 4) != 0) {
-		throw InvalidInputException("index payload magic is not 'CZIP': %s", source);
+		throw InvalidInputException(std::string("index payload magic is not 'CZIP': ") + source);
 	}
 	auto version = ReadU16LE(pp + 4);
 	if (version > COZIP_FORMAT_VERSION) {
-		throw InvalidInputException("unsupported cozip format version %d: %s", (int)version, source);
+		throw InvalidInputException(std::string("unsupported cozip format version ") + std::to_string((int)version) +
+		                            ": " + source);
 	}
 	auto profile = pp[6];
 	if (profile != COZIP_PROFILE_FLAT) {
-		throw InvalidInputException("read_cozip only supports the Flat profile (profile=1). Got profile=%d in: %s",
-		                            (int)profile, source);
+		throw InvalidInputException(std::string("read_cozip only supports the Flat profile (profile=1). Got profile=") +
+		                            std::to_string((int)profile) + " in: " + source);
 	}
 	auto n_entries = (idx_t)ReadU32LE(pp + 7);
 
@@ -157,11 +138,9 @@ static CozipMetadataEntry ParseCozipMetadataLocation(FileHandle &handle, const s
 			return CozipMetadataEntry {offsets[i], sizes[i]};
 		}
 	}
-	throw InvalidInputException("Flat-profile cozip is missing __metadata__ entry: %s", source);
+	throw InvalidInputException(std::string("Flat-profile cozip is missing __metadata__ entry: ") + source);
 }
 
-// Map the user-facing scheme to the GDAL VSI handler that GDAL or rasterio
-// can open directly without re-downloading the archive.
 static std::string BuildVsiBase(const std::string &path) {
 	if (StringUtil::StartsWith(path, "https://") || StringUtil::StartsWith(path, "http://")) {
 		return "/vsicurl/" + path;
@@ -194,7 +173,7 @@ static std::string BuildVsiBase(const std::string &path) {
 		auto sl1 = rest.find('/');
 		auto sl2 = (sl1 == std::string::npos) ? std::string::npos : rest.find('/', sl1 + 1);
 		if (sl1 == std::string::npos || sl2 == std::string::npos) {
-			throw InvalidInputException("cannot parse hf:// URL for VSI mapping: %s", path);
+			throw InvalidInputException(std::string("cannot parse hf:// URL for VSI mapping: ") + path);
 		}
 		auto owner_repo = rest.substr(0, sl2);
 		auto inner = rest.substr(sl2 + 1);
@@ -203,196 +182,78 @@ static std::string BuildVsiBase(const std::string &path) {
 	return path;
 }
 
-// The ParquetReader lives in BindData because it owns the FileHandle returned
-// by CozipSubFileSystem (which in turn wraps the underlying archive handle)
-// plus the parsed Parquet metadata. ScanState is per-init and lives in
-// GlobalState.
-struct ReadCozipBindData : public TableFunctionData {
-	std::string path;
-	std::string vsi_base;
-	bool with_gdal_vsi = true;
+template <typename Body>
+static void StringScalarLoop(DataChunk &args, Vector &result, const char *fn, Body body) {
+	auto count = args.size();
+	args.data[0].Flatten(count);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
 
-	vector<LogicalType> parquet_types;
-	vector<string> parquet_names;
-	idx_t offset_col_idx = DConstants::INVALID_INDEX;
-	idx_t size_col_idx = DConstants::INVALID_INDEX;
+	auto src = FlatVector::GetData<string_t>(args.data[0]);
+	auto dst = FlatVector::GetData<string_t>(result);
+	auto &src_valid = FlatVector::Validity(args.data[0]);
 
-	unique_ptr<ParquetReader> reader;
-};
-
-struct ReadCozipGlobalState : public GlobalTableFunctionState {
-	ParquetReaderScanState scan_state;
-	idx_t parquet_column_count = 0;
-	// staging lives in the global state, not on the stack of the scan
-	// function. Vector::Reference below shares storage with this chunk
-	// across calls; a local DataChunk would free its buffers before
-	// DuckDB consumes the output. Held by unique_ptr so the move of
-	// the global state at the end of ReadCozipInit only moves a pointer.
-	unique_ptr<DataChunk> staging;
-};
-
-static unique_ptr<FunctionData> ReadCozipBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
-	if (input.inputs[0].IsNull()) {
-		throw BinderException("read_cozip path cannot be NULL");
-	}
-	auto path = StringValue::Get(input.inputs[0]);
-
-	auto bind_data = make_uniq<ReadCozipBindData>();
-	bind_data->path = path;
-
-	for (auto &kv : input.named_parameters) {
-		auto key = StringUtil::Lower(kv.first);
-		if (key == "gdal_vsi") {
-			bind_data->with_gdal_vsi = BooleanValue::Get(kv.second);
+	for (idx_t i = 0; i < count; i++) {
+		if (!src_valid.RowIsValid(i)) {
+			throw InvalidInputException(std::string(fn) + ": path argument is NULL");
 		}
+		dst[i] = StringVector::AddString(result, body(std::string(src[i].GetString())));
 	}
+}
 
-	// Parse the cozip index by opening a short-lived bootstrap handle.
-	// We only need it to discover the byte range of the __metadata__
-	// Parquet entry; the actual Parquet reads happen later through
-	// ParquetReader via the cozip-subfile:// virtual path. The bootstrap
-	// handle is dropped at the end of this scope so the connection it
-	// holds can be reused or released before ParquetReader opens its own.
-	auto &fs = FileSystem::GetFileSystem(context);
-	CozipMetadataEntry md;
-	{
+static void CozipOffsetSizeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &fs = FileSystem::GetFileSystem(state.GetContext());
+	StringScalarLoop(args, result, "cozip_offset_size", [&](const std::string &path) {
 		auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
 		if (!handle) {
-			throw IOException("could not open cozip archive: %s", path);
+			throw IOException(std::string("cozip_offset_size: could not open ") + path);
 		}
-		md = ParseCozipMetadataLocation(*handle, path);
-	}
-
-	// Build a virtual path that, when opened by ParquetReader, will be
-	// intercepted by CozipSubFileSystem and resolved to a FileHandle that
-	// exposes only the bytes [md.offset, md.offset + md.size) of the
-	// archive. ParquetReader sees what looks like a standalone Parquet
-	// file of md.size bytes and issues range requests against it; those
-	// requests are translated to range requests against the underlying
-	// archive, so reads remain lazy and no temp file is ever written.
-	auto virtual_path = StringUtil::Format("cozip-subfile://%llu_%llu!%s", (unsigned long long)md.offset,
-	                                       (unsigned long long)md.size, path);
-
-	ParquetOptions parquet_options(context);
-	bind_data->reader = make_uniq<ParquetReader>(context, OpenFileInfo(virtual_path), parquet_options);
-
-	for (auto &col : bind_data->reader->columns) {
-		bind_data->parquet_names.push_back(col.name);
-		bind_data->parquet_types.push_back(col.type);
-	}
-
-	// Project every parquet column onto its own output slot. column_ids is
-	// normally filled by the MultiFileFunction pipeline from a projection
-	// list; we drive ParquetReader directly so we set it ourselves to the
-	// identity mapping (output[i] <- parquet column i).
-	for (idx_t i = 0; i < bind_data->reader->columns.size(); i++) {
-		bind_data->reader->column_ids.emplace_back(i);
-	}
-
-	return_types = bind_data->parquet_types;
-	names = bind_data->parquet_names;
-
-	for (idx_t i = 0; i < bind_data->parquet_names.size(); i++) {
-		if (bind_data->parquet_names[i] == "offset") {
-			bind_data->offset_col_idx = i;
-		} else if (bind_data->parquet_names[i] == "size") {
-			bind_data->size_col_idx = i;
-		}
-	}
-
-	if (bind_data->with_gdal_vsi) {
-		if (bind_data->offset_col_idx == DConstants::INVALID_INDEX ||
-		    bind_data->size_col_idx == DConstants::INVALID_INDEX) {
-			throw InvalidInputException("__metadata__ Parquet missing required 'offset' and/or 'size' columns "
-			                            "(needed to build cozip:gdal_vsi). Set gdal_vsi := false to skip.");
-		}
-		bind_data->vsi_base = BuildVsiBase(path);
-		return_types.push_back(LogicalType::VARCHAR);
-		names.push_back(COZIP_VSI_COLUMN);
-	}
-
-	return std::move(bind_data);
+		auto md = ParseCozipMetadataLocation(*handle, path);
+		return std::to_string(md.offset) + "_" + std::to_string(md.size);
+	});
 }
 
-static unique_ptr<GlobalTableFunctionState> ReadCozipInit(ClientContext &context, TableFunctionInitInput &input) {
-	auto &bind_data = input.bind_data->Cast<ReadCozipBindData>();
-	auto state = make_uniq<ReadCozipGlobalState>();
-	state->parquet_column_count = bind_data.parquet_types.size();
-
-	// Initialize the staging chunk here so its buffers outlive each scan
-	// call. Use the Allocator& overload of DataChunk::Initialize for the
-	// same reason as below in ReadCozipFunction.
-	state->staging = make_uniq<DataChunk>();
-	state->staging->Initialize(Allocator::Get(context), bind_data.parquet_types);
-
-	vector<idx_t> groups_to_read;
-	auto n_groups = bind_data.reader->NumRowGroups();
-	groups_to_read.reserve(n_groups);
-	for (idx_t i = 0; i < n_groups; i++) {
-		groups_to_read.push_back(i);
-	}
-	bind_data.reader->InitializeScan(context, state->scan_state, std::move(groups_to_read));
-
-	return std::move(state);
+static void CozipVsiBaseFunction(DataChunk &args, ExpressionState &, Vector &result) {
+	StringScalarLoop(args, result, "cozip_vsi_base", BuildVsiBase);
 }
 
-static void ReadCozipFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &bind_data = data_p.bind_data->Cast<ReadCozipBindData>();
-	auto &gstate = data_p.global_state->Cast<ReadCozipGlobalState>();
-
-	auto &staging = *gstate.staging;
-
-	// ParquetReader::Scan can return without filling the chunk while it
-	// warms up its row-group prefetch. Loop until we either get data or
-	// the scan reports it is finished.
-	while (true) {
-		staging.Reset();
-		bind_data.reader->Scan(context, gstate.scan_state, staging);
-		if (staging.size() > 0 || gstate.scan_state.finished) {
-			break;
-		}
-	}
-
-	auto row_count = staging.size();
-	output.SetCardinality(row_count);
-	if (row_count == 0) {
-		return;
-	}
-
-	for (idx_t c = 0; c < gstate.parquet_column_count; c++) {
-		output.data[c].Reference(staging.data[c]);
-	}
-
-	if (bind_data.with_gdal_vsi) {
-		auto &offset_vec = staging.data[bind_data.offset_col_idx];
-		auto &size_vec = staging.data[bind_data.size_col_idx];
-		offset_vec.Flatten(row_count);
-		size_vec.Flatten(row_count);
-		auto offsets = FlatVector::GetData<uint64_t>(offset_vec);
-		auto sizes = FlatVector::GetData<uint64_t>(size_vec);
-
-		auto &out_vec = output.data[gstate.parquet_column_count];
-		auto out_data = FlatVector::GetData<string_t>(out_vec);
-		for (idx_t r = 0; r < row_count; r++) {
-			auto s =
-			    "/vsisubfile/" + std::to_string(offsets[r]) + "_" + std::to_string(sizes[r]) + "," + bind_data.vsi_base;
-			out_data[r] = StringVector::AddString(out_vec, s);
-		}
-	}
-}
+// The macro always emits a cozip:gdal_vsi column. When gdal_vsi is false
+// the value is NULL; CASE short-circuits so cozip_vsi_base is not called.
+static const char *kReadCozipMacro = R"sql(
+CREATE OR REPLACE MACRO read_cozip(p, gdal_vsi := true) AS TABLE
+SELECT *,
+  CASE WHEN gdal_vsi
+       THEN '/vsisubfile/' || "offset" || '_' || "size" || ',' || cozip_vsi_base(p)
+       ELSE NULL
+  END AS "cozip:gdal_vsi"
+FROM read_parquet('cozip-subfile://' || cozip_offset_size(p) || '!' || p);
+)sql";
 
 static void LoadInternal(ExtensionLoader &loader) {
-	// Register the internal cozip-subfile:// FileSystem first, so that by
-	// the time read_cozip's bind constructs a cozip-subfile:// virtual
-	// path and hands it to ParquetReader, the VFS already knows how to
-	// dispatch it.
-	auto &fs = loader.GetDatabaseInstance().GetFileSystem();
-	fs.RegisterSubSystem(make_uniq<CozipSubFileSystem>());
+	auto &db = loader.GetDatabaseInstance();
 
-	TableFunction read_cozip("read_cozip", {LogicalType::VARCHAR}, ReadCozipFunction, ReadCozipBind, ReadCozipInit);
-	read_cozip.named_parameters["gdal_vsi"] = LogicalType::BOOLEAN;
-	loader.RegisterFunction(read_cozip);
+	db.GetFileSystem().RegisterSubSystem(make_uniq<CozipSubFileSystem>());
+
+	ScalarFunction offset_size_fn("cozip_offset_size", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                              CozipOffsetSizeFunction);
+	loader.RegisterFunction(offset_size_fn);
+
+	ScalarFunction vsi_base_fn("cozip_vsi_base", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipVsiBaseFunction);
+	loader.RegisterFunction(vsi_base_fn);
+
+	// schema="main" + internal=true are required: ExtensionLoader installs
+	// into the system catalog, which only accepts internal entries, and
+	// the Parser leaves both fields default. Built-in DuckDB macros set
+	// both the same way.
+	Parser parser;
+	parser.ParseQuery(kReadCozipMacro);
+	if (parser.statements.empty()) {
+		throw IOException("cozip: read_cozip macro SQL produced no statements");
+	}
+	auto &create_stmt = static_cast<CreateStatement &>(*parser.statements[0]);
+	auto &macro_info = static_cast<CreateMacroInfo &>(*create_stmt.info);
+	macro_info.schema = "main";
+	macro_info.internal = true;
+	loader.RegisterFunction(macro_info);
 }
 
 void CozipExtension::Load(ExtensionLoader &loader) {

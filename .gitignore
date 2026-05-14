@@ -27,3 +27,7 @@ bundle.sh
 bundle.txt
 *.bak
 *.bak2
+
+cozip-wasm-test.html
+
+.vscode/settings.json
