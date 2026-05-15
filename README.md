@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="images/banner.svg" alt="cozip — DuckDB extension" width="700"/>
+  <img src="https://raw.githubusercontent.com/asterisk-labs/cozip/refs/heads/main/images/banner.svg" alt="cozip — DuckDB extension" width="700"/>
 
   <p>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-EAB308?style=flat-square" alt="License MIT"/></a>
@@ -92,6 +92,6 @@ MIT
   Developed with ❤️ by
   <br><br>
   <a href="https://asterisk.coop">
-    <img src="images/asterisk_logo.svg" alt="Asterisk Labs" width="400"/>
+    <img src="https://raw.githubusercontent.com/asterisk-labs/cozip/refs/heads/main/images/asterisk_logo.svg" alt="Asterisk Labs" width="400"/>
   </a>
 </div>
