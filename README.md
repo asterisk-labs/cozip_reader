@@ -1,8 +1,19 @@
-# cozip
+<div align="center">
+  <img src="images/banner.svg" alt="cozip — DuckDB extension" width="700"/>
 
-A DuckDB extension to read Cloud-Optimized ZIP (cozip) archives as SQL tables, from local files or remote URLs.
+  <p>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-EAB308?style=flat-square" alt="License MIT"/></a>
+    <a href="https://duckdb.org/community_extensions/extensions/cozip.html"><img src="https://img.shields.io/badge/duckdb-community--extension-FFF000?logo=duckdb&logoColor=black&style=flat-square" alt="DuckDB community extension"/></a>
+    <a href="https://shell.duckdb.org"><img src="https://img.shields.io/badge/try-shell.duckdb.org-654FF0?logo=webassembly&logoColor=white&style=flat-square" alt="Try in browser"/></a>
+    <a href="https://github.com/asterisk-labs/cozip/blob/main/SPEC.md"><img src="https://img.shields.io/badge/cozip-format--%26--spec-A8B9CC?style=flat-square" alt="cozip format"/></a>
+  </p>
+</div>
 
-cozip looks like a regular ZIP from the outside, but it carries a tiny index at byte 0 that points to an embedded Parquet metadata file. The extension opens that Parquet directly as a DuckDB table, so a multi-gigabyte archive becomes queryable with just a couple of HTTP range requests. Random access stays cheap because there is no central-directory scan at the end of the file and no full download.
+---
+
+Query a [cozip](https://github.com/asterisk-labs/cozip) archive as a SQL table — locally, over HTTPS, S3, GCS, Azure, or HuggingFace — without downloading it. cozip places a Parquet manifest at byte 0 of the ZIP, so a multi-gigabyte archive becomes a queryable table with one or two HTTP range requests. No central-directory scan, no full download.
+
+The archive is still a valid ZIP. `unzip`, `zipfile.ZipFile`, your OS file preview — all unchanged.
 
 ## Install
 
@@ -11,11 +22,9 @@ INSTALL cozip FROM community;
 LOAD cozip;
 ```
 
-Works in DuckDB on native (Linux, macOS, Windows) and WebAssembly.
+Works on every DuckDB target: Linux, macOS, Windows, and WebAssembly (try it on `shell.duckdb.org`).
 
-## Example
-
-Here's a single tile from the [Major TOM VIIRS Nighttime Light](https://huggingface.co/datasets/Major-TOM/Core-VIIRS-Nighttime-Light) dataset on HuggingFace.
+## Query
 
 ```sql
 SELECT *
@@ -23,12 +32,66 @@ FROM read_cozip('https://huggingface.co/datasets/Major-TOM/Core-VIIRS-Nighttime-
 LIMIT 10;
 ```
 
-`read_cozip` opens the archive's `__metadata__` Parquet and hands you the rows directly. From there you can filter, join, or use the per-row file references to fetch only the rasters you actually need.
+One row per entry inside the archive: `name`, `offset`, `size`, plus whatever columns the writer included in `__metadata__` (`split`, `label`, `geometry`, …). Filter, join, sample, then fetch only the payloads you actually need.
 
-You can pass a local path or any remote URL DuckDB can open. `https://`, `s3://` and S3-compatible storage work directly through `httpfs`. `azure://` and `hf://datasets/...` work when the matching extension is installed (DuckDB autoloads them on demand).
+```sql
+-- Sample 32 training tiles from a remote archive without downloading it.
+SELECT name, "cozip:gdal_vsi"
+FROM read_cozip('s3://my-bucket/dataset.cozip')
+WHERE split = 'train'
+USING SAMPLE 32 ROWS;
+```
 
-`read_cozip` also adds a `cozip:gdal_vsi` column with a ready-made `/vsisubfile/...` path you can feed straight into GDAL to open the inner file without re-downloading the archive.
+## URL schemes
+
+| Scheme              | Backend  | Notes                                              |
+|---------------------|----------|----------------------------------------------------|
+| `/local/path`       | local FS | No extension required.                             |
+| `https://`          | `httpfs` | Autoloads. Supports Range requests.                |
+| `s3://`             | `httpfs` | S3-compatible (R2, MinIO) via `SET s3_*` settings. |
+| `gs://`, `gcs://`   | `httpfs` | Google Cloud Storage.                              |
+| `azure://`          | `azure`  | Autoloads.                                         |
+| `hf://datasets/...` | `hf`     | Autoloads.                                         |
+
+## The `cozip:gdal_vsi` column
+
+Every row includes a synthetic `cozip:gdal_vsi` column with a ready-made `/vsisubfile/<offset>_<size>,/vsi.../<url>` path. Hand it to GDAL, rasterio, or anything that speaks VSI to open the inner file without re-downloading the archive.
+
+```python
+import duckdb, rasterio
+
+rows = duckdb.sql("""
+    SELECT name, "cozip:gdal_vsi"
+    FROM read_cozip('https://.../dataset.zip')
+    WHERE split = 'val'
+    LIMIT 8
+""").fetchall()
+
+for name, vsi in rows:
+    with rasterio.open(vsi) as src:
+        ...   # GDAL issues range requests against the archive
+```
+
+Skip it with `gdal_vsi := false`:
+
+```sql
+SELECT name, offset, size
+FROM read_cozip('dataset.zip', gdal_vsi := false);
+```
+
+## See also
+
+- **[cozip](https://github.com/asterisk-labs/cozip)** — the format, the spec, and bindings for Python, R, Julia, JavaScript, and C.
 
 ## License
 
-MIT, Asterisk Labs.
+MIT
+
+<div align="center">
+  <br>
+  Developed with ❤️ by
+  <br><br>
+  <a href="https://asterisk.coop">
+    <img src="images/asterisk_logo.svg" alt="Asterisk Labs" width="400"/>
+  </a>
+</div>
