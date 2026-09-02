@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.3.0 — 2026-09-02
+
+### Added
+
+- `cozip_profile(path)` reads the 58-byte bootstrap and returns `none`,
+  `flat`, `taco`, or `unknown:<value>` without opening a Parquet manifest.
+
+### Changed
+
+- The documented contract is explicitly Flat-only: `read_cozip()` rejects
+  TACO-profile `.tacozip` containers before attempting Parquet access.
+
 ## v1.2.0 — 2026-05-14
 
 ### Fixed

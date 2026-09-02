@@ -36,6 +36,7 @@ static constexpr idx_t COZIP_MIN_SIZE = COZIP_LFH_SIZE + COZIP_HASH_WINDOW_SIZE;
 static constexpr idx_t COZIP_BOOTSTRAP_SIZE = 65536;
 static constexpr uint16_t COZIP_EXTRA_HEADER_ID = 0xCA0C;
 static constexpr uint8_t COZIP_PROFILE_FLAT = 1;
+static constexpr uint8_t COZIP_PROFILE_TACO = 2;
 static constexpr uint16_t COZIP_FORMAT_VERSION = 1;
 
 static const std::string COZIP_INDEX_NAME = "__cozip__";
@@ -56,6 +57,40 @@ struct CozipMetadataEntry {
 	uint64_t size;
 };
 
+static uint8_t ParseCozipProfilePrefix(const uint8_t *head, idx_t size, const std::string &source) {
+	if (size < COZIP_LFH_SIZE + 7) {
+		throw InvalidInputException(std::string("cozip profile prefix is truncated: ") + source);
+	}
+	if (ReadU32LE(head) != ZIP_LFH_SIGNATURE) {
+		throw InvalidInputException(std::string("byte 0 is not a ZIP Local File Header: ") + source);
+	}
+	if (ReadU16LE(head + 8) != 0) {
+		throw InvalidInputException(std::string("__cozip__ compression method is not STORE: ") + source);
+	}
+	auto name_len = ReadU16LE(head + 26);
+	auto extra_len = ReadU16LE(head + 28);
+	if (name_len != 9 || extra_len != 12) {
+		throw InvalidInputException(std::string("LFH does not match cozip layout: ") + source);
+	}
+	if (memcmp(head + 30, COZIP_INDEX_NAME.data(), 9) != 0) {
+		throw InvalidInputException(std::string("first ZIP entry is not __cozip__: ") + source);
+	}
+	if (ReadU16LE(head + 39) != COZIP_EXTRA_HEADER_ID || ReadU16LE(head + 41) != 8) {
+		throw InvalidInputException(std::string("cozip integrity extra field (0xCA0C) missing: ") + source);
+	}
+
+	auto pp = head + COZIP_LFH_SIZE;
+	if (memcmp(pp, "CZIP", 4) != 0) {
+		throw InvalidInputException(std::string("index payload magic is not 'CZIP': ") + source);
+	}
+	auto version = ReadU16LE(pp + 4);
+	if (version > COZIP_FORMAT_VERSION) {
+		throw InvalidInputException(std::string("unsupported cozip format version ") + std::to_string((int)version) +
+		                            ": " + source);
+	}
+	return pp[6];
+}
+
 static CozipMetadataEntry ParseCozipMetadataLocation(FileHandle &handle, const std::string &source) {
 	auto file_size = (idx_t)handle.GetFileSize();
 	if (file_size < COZIP_MIN_SIZE) {
@@ -66,27 +101,16 @@ static CozipMetadataEntry ParseCozipMetadataLocation(FileHandle &handle, const s
 	auto bootstrap = std::min<idx_t>(COZIP_BOOTSTRAP_SIZE, file_size);
 	std::vector<uint8_t> head(bootstrap);
 	handle.Read(head.data(), bootstrap, 0);
-
-	if (ReadU32LE(head.data()) != ZIP_LFH_SIGNATURE) {
-		throw InvalidInputException(std::string("byte 0 is not a ZIP Local File Header: ") + source);
-	}
-	auto name_len = ReadU16LE(head.data() + 26);
-	auto extra_len = ReadU16LE(head.data() + 28);
-	if (name_len != 9 || extra_len != 12) {
-		throw InvalidInputException(std::string("LFH does not match cozip layout: ") + source);
-	}
-	if (memcmp(head.data() + 30, COZIP_INDEX_NAME.data(), 9) != 0) {
-		throw InvalidInputException(std::string("first ZIP entry is not __cozip__: ") + source);
-	}
-	if (ReadU16LE(head.data() + 39) != COZIP_EXTRA_HEADER_ID) {
-		throw InvalidInputException(std::string("cozip integrity extra field (0xCA0C) missing: ") + source);
-	}
+	auto profile = ParseCozipProfilePrefix(head.data(), head.size(), source);
 
 	auto index_payload_size = (idx_t)ReadU32LE(head.data() + 18);
 	if (index_payload_size == 0) {
 		throw InvalidInputException(std::string("cozip index payload size is zero: ") + source);
 	}
 	auto index_payload_end = COZIP_LFH_SIZE + index_payload_size;
+	if (index_payload_end > file_size) {
+		throw InvalidInputException(std::string("cozip index payload is truncated: ") + source);
+	}
 
 	if (index_payload_end > head.size()) {
 		auto extra = index_payload_end - head.size();
@@ -95,20 +119,11 @@ static CozipMetadataEntry ParseCozipMetadataLocation(FileHandle &handle, const s
 		head.insert(head.end(), tail.begin(), tail.end());
 	}
 
-	auto pp = head.data() + COZIP_LFH_SIZE;
-	if (memcmp(pp, "CZIP", 4) != 0) {
-		throw InvalidInputException(std::string("index payload magic is not 'CZIP': ") + source);
-	}
-	auto version = ReadU16LE(pp + 4);
-	if (version > COZIP_FORMAT_VERSION) {
-		throw InvalidInputException(std::string("unsupported cozip format version ") + std::to_string((int)version) +
-		                            ": " + source);
-	}
-	auto profile = pp[6];
 	if (profile != COZIP_PROFILE_FLAT) {
 		throw InvalidInputException(std::string("read_cozip only supports the Flat profile (profile=1). Got profile=") +
 		                            std::to_string((int)profile) + " in: " + source);
 	}
+	auto pp = head.data() + COZIP_LFH_SIZE;
 	auto n_entries = (idx_t)ReadU32LE(pp + 7);
 
 	auto cur = pp + COZIP_INDEX_HEADER_SIZE;
@@ -212,6 +227,34 @@ static void CozipOffsetSizeFunction(DataChunk &args, ExpressionState &state, Vec
 	});
 }
 
+static void CozipProfileFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &fs = FileSystem::GetFileSystem(state.GetContext());
+	StringScalarLoop(args, result, "cozip_profile", [&](const std::string &path) {
+		auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+		if (!handle) {
+			throw IOException(std::string("cozip_profile: could not open ") + path);
+		}
+		auto file_size = (idx_t)handle->GetFileSize();
+		if (file_size < COZIP_MIN_SIZE) {
+			throw InvalidInputException(std::string("cozip archive too small (minimum is ") +
+			                            std::to_string(COZIP_MIN_SIZE) + " bytes): " + path);
+		}
+		std::vector<uint8_t> prefix(COZIP_LFH_SIZE + 7);
+		handle->Read(prefix.data(), prefix.size(), 0);
+		auto profile = ParseCozipProfilePrefix(prefix.data(), prefix.size(), path);
+		switch (profile) {
+		case 0:
+			return std::string("none");
+		case COZIP_PROFILE_FLAT:
+			return std::string("flat");
+		case COZIP_PROFILE_TACO:
+			return std::string("taco");
+		default:
+			return std::string("unknown:") + std::to_string((int)profile);
+		}
+	});
+}
+
 static void CozipVsiBaseFunction(DataChunk &args, ExpressionState &, Vector &result) {
 	StringScalarLoop(args, result, "cozip_vsi_base", BuildVsiBase);
 }
@@ -236,6 +279,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ScalarFunction offset_size_fn("cozip_offset_size", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                              CozipOffsetSizeFunction);
 	loader.RegisterFunction(offset_size_fn);
+
+	ScalarFunction profile_fn("cozip_profile", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipProfileFunction);
+	loader.RegisterFunction(profile_fn);
 
 	ScalarFunction vsi_base_fn("cozip_vsi_base", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipVsiBaseFunction);
 	loader.RegisterFunction(vsi_base_fn);

@@ -8,6 +8,11 @@ require parquet
 
 # flat_simple
 
+query T
+SELECT cozip_profile('test/data/flat_simple.cozip');
+----
+flat
+
 query I
 SELECT count(*) FROM read_cozip('test/data/flat_simple.cozip');
 ----

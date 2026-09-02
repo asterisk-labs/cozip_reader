@@ -11,7 +11,7 @@
 
 ---
 
-Query a [cozip](https://github.com/asterisk-labs/cozip) archive as a SQL table — locally, over HTTPS, S3, GCS, Azure, or HuggingFace — without downloading it. cozip places a Parquet manifest at byte 0 of the ZIP, so a multi-gigabyte archive becomes a queryable table with one or two HTTP range requests. No central-directory scan, no full download.
+Query a Flat [cozip](https://github.com/asterisk-labs/cozip) archive as a SQL table — locally, over HTTPS, S3, GCS, Azure, or HuggingFace — without downloading it. cozip places an index at byte 0 of the ZIP, so a multi-gigabyte archive becomes a queryable table with one or two HTTP range requests. No central-directory scan, no full download.
 
 The archive is still a valid ZIP. `unzip`, `zipfile.ZipFile`, your OS file preview — all unchanged.
 
@@ -42,6 +42,17 @@ WHERE split = 'train'
 USING SAMPLE 32 ROWS;
 ```
 
+`read_cozip()` is intentionally Flat-only. Inspect the profile cheaply before
+dispatching to a format-specific reader:
+
+```sql
+SELECT cozip_profile('dataset.cozip');       -- flat
+SELECT cozip_profile('release.tacozip');     -- taco
+```
+
+Passing a TACO-profile `.tacozip` to `read_cozip()` raises an error instead of
+trying to interpret TACO metadata as a Flat manifest.
+
 ## URL schemes
 
 | Scheme              | Backend  | Notes                                              |
@@ -62,7 +73,7 @@ import duckdb, rasterio
 
 rows = duckdb.sql("""
     SELECT name, "cozip:gdal_vsi"
-    FROM read_cozip('https://.../dataset.zip')
+    FROM read_cozip('https://.../dataset.cozip')
     WHERE split = 'val'
     LIMIT 8
 """).fetchall()
@@ -76,7 +87,7 @@ Skip it with `gdal_vsi := false`:
 
 ```sql
 SELECT name, offset, size
-FROM read_cozip('dataset.zip', gdal_vsi := false);
+FROM read_cozip('dataset.cozip', gdal_vsi := false);
 ```
 
 ## See also
