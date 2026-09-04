@@ -1,9 +1,10 @@
 """Generate cozip test fixtures for the DuckDB extension.
 
-Produces two archives under test/data/.
+Produces three archives under test/data/.
 
   flat_simple.zip   plain metadata (name, offset, size, category)
   flat_geo.zip      GeoParquet metadata (adds a Point geometry column)
+  flat_bad_hash.zip flat_simple.zip with a damaged integrity field
 
 The 4 inner files together fit comfortably above the cozip 1.0 minimum
 size of 32 KiB + 51 bytes, so the produced archives are valid without
@@ -97,6 +98,12 @@ def build_geo(
     cozip.stage_create(out_path, staged_paths, meta_pq)
 
 
+def build_bad_hash(source: Path, out_path: Path) -> None:
+    data = bytearray(source.read_bytes())
+    data[43] ^= 1
+    out_path.write_bytes(data)
+
+
 def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -111,6 +118,10 @@ def main() -> None:
         geo_out = DATA_DIR / "flat_geo.zip"
         build_geo(geo_out, inputs, tmp_root)
         print(f"wrote {geo_out.relative_to(THIS_DIR.parent)} " f"({geo_out.stat().st_size} bytes)")
+
+        bad_hash_out = DATA_DIR / "flat_bad_hash.zip"
+        build_bad_hash(simple_out, bad_hash_out)
+        print(f"wrote {bad_hash_out.relative_to(THIS_DIR.parent)} " f"({bad_hash_out.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":

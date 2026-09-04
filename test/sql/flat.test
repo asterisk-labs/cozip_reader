@@ -137,6 +137,11 @@ SELECT * FROM read_flat('test/sql/flat.test');
 cozip archive too small
 
 statement error
-SELECT * FROM read_flat('test/data/does_not_exist.cozip');
+SELECT * FROM read_flat('test/data/does_not_exist.zip');
 ----
 Cannot open file
+
+statement error
+SELECT * FROM read_flat('test/data/flat_bad_hash.zip');
+----
+integrity hash mismatch

@@ -21,6 +21,13 @@ static constexpr idx_t COZIP_HASH_WINDOW_SIZE = 32768;
 static constexpr idx_t COZIP_MIN_SIZE = COZIP_LFH_SIZE + COZIP_HASH_WINDOW_SIZE;
 static constexpr idx_t COZIP_BOOTSTRAP_SIZE = 65536;
 
+// cozip spec 8.3
+static constexpr uint64_t COZIP_FNV_OFFSET_BASIS = 0xCBF29CE484222325ULL;
+static constexpr uint64_t COZIP_FNV_PRIME = 0x100000001B3ULL;
+
+static constexpr const char *COZIP_INDEX_NAME = "__cozip__";
+static constexpr const char *COZIP_PADDING_NAME = "__cozip_padding__";
+
 static constexpr uint8_t COZIP_PROFILE_NONE = 0;
 static constexpr uint8_t COZIP_PROFILE_FLAT = 1;
 static constexpr uint8_t COZIP_PROFILE_TACO = 2;

@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/client_context.hpp"
 
 #include <cstring>
@@ -11,7 +12,6 @@ namespace duckdb {
 static constexpr uint32_t ZIP_LFH_SIGNATURE = 0x04034B50U;
 static constexpr uint16_t COZIP_EXTRA_HEADER_ID = 0xCA0C;
 static constexpr uint16_t COZIP_FORMAT_VERSION = 1;
-static const char *COZIP_INDEX_NAME = "__cozip__";
 static constexpr idx_t COZIP_INDEX_NAME_LEN = 9;
 
 static inline uint16_t ReadU16LE(const uint8_t *p) {
@@ -32,8 +32,19 @@ static uint8_t ParseProfilePrefix(const uint8_t *head, idx_t size, const string 
 	if (ReadU32LE(head) != ZIP_LFH_SIGNATURE) {
 		throw InvalidInputException("byte 0 is not a ZIP Local File Header: %s", source);
 	}
+	// Bits 0, 3, 6 and 13: encryption, data descriptor, strong encryption and
+	// masked local headers. All four make the fast path unreadable.
+	auto flags = ReadU16LE(head + 6);
+	if (flags & 0x2049) {
+		throw InvalidInputException("__cozip__ has a forbidden general purpose bit set: %s", source);
+	}
 	if (ReadU16LE(head + 8) != 0) {
 		throw InvalidInputException("__cozip__ compression method is not STORE: %s", source);
+	}
+	auto compressed = ReadU32LE(head + 18);
+	auto uncompressed = ReadU32LE(head + 22);
+	if (compressed != uncompressed || compressed == 0 || compressed == 0xFFFFFFFFu) {
+		throw InvalidInputException("__cozip__ sizes are not an equal, non-zero ZIP32 pair: %s", source);
 	}
 	if (ReadU16LE(head + 26) != COZIP_INDEX_NAME_LEN || ReadU16LE(head + 28) != 12) {
 		throw InvalidInputException("LFH does not match cozip layout: %s", source);
@@ -69,6 +80,81 @@ uint8_t ReadCozipProfile(FileHandle &handle, const string &source) {
 	return ParseProfilePrefix(prefix.data(), prefix.size(), source);
 }
 
+static void ValidateIndexName(const string &name, const string &source) {
+	if (name.empty()) {
+		throw InvalidInputException("cozip index has an empty name: %s", source);
+	}
+	for (auto c : name) {
+		auto byte = (unsigned char)c;
+		if (byte < 0x01 || byte > 0x7F) {
+			throw InvalidInputException("cozip index name '%s' is not ASCII: %s", name, source);
+		}
+	}
+	if (name == COZIP_INDEX_NAME || name == COZIP_PADDING_NAME) {
+		throw InvalidInputException("cozip index lists the reserved name '%s': %s", name, source);
+	}
+	if (name.front() == '/' || name.back() == '/') {
+		throw InvalidInputException("cozip index name '%s' starts or ends with '/': %s", name, source);
+	}
+	if (name.size() > 1 && StringUtil::CharacterIsAlpha(name[0]) && name[1] == ':') {
+		throw InvalidInputException("cozip index name '%s' has a drive letter: %s", name, source);
+	}
+	if (name.find('\\') != string::npos) {
+		throw InvalidInputException("cozip index name '%s' contains a backslash: %s", name, source);
+	}
+	idx_t start = 0;
+	while (start <= name.size()) {
+		auto stop = name.find('/', start);
+		auto component = name.substr(start, stop == string::npos ? string::npos : stop - start);
+		if (component == "." || component == "..") {
+			throw InvalidInputException("cozip index name '%s' has a '%s' component: %s", name, component, source);
+		}
+		if (stop == string::npos) {
+			break;
+		}
+		start = stop + 1;
+	}
+}
+
+// cozip spec 8.3: FNV-1a 64 over the index region followed by the trailing
+// 32 KiB, each byte counted once where the two overlap.
+static uint64_t Fnv1a64(const uint8_t *data, idx_t size, uint64_t seed) {
+	auto hash = seed;
+	for (idx_t i = 0; i < size; i++) {
+		hash ^= (uint64_t)data[i];
+		hash *= COZIP_FNV_PRIME;
+	}
+	return hash;
+}
+
+// cozip spec 8.5: check the index and suffix before trusting byte ranges. This
+// detects corruption; FNV-1a is not an authentication hash.
+static void VerifyIntegrityHash(FileHandle &handle, const uint8_t *index_payload, idx_t index_size, idx_t file_size,
+                                uint64_t stored, const string &source) {
+	auto index_end = COZIP_LFH_SIZE + index_size;
+	auto suffix_start = file_size - COZIP_HASH_WINDOW_SIZE;
+
+	uint64_t hash = COZIP_FNV_OFFSET_BASIS;
+	if (index_end <= suffix_start) {
+		hash = Fnv1a64(index_payload, index_size, hash);
+		vector<uint8_t> suffix(COZIP_HASH_WINDOW_SIZE);
+		handle.Read(suffix.data(), suffix.size(), suffix_start);
+		hash = Fnv1a64(suffix.data(), suffix.size(), hash);
+	} else {
+		// The regions overlap, so hash one contiguous run from the index start.
+		hash = Fnv1a64(index_payload, index_size, hash);
+		auto tail_size = file_size - index_end;
+		if (tail_size > 0) {
+			vector<uint8_t> tail(tail_size);
+			handle.Read(tail.data(), tail.size(), index_end);
+			hash = Fnv1a64(tail.data(), tail.size(), hash);
+		}
+	}
+	if (hash != stored) {
+		throw InvalidInputException("cozip integrity hash mismatch: %s", source);
+	}
+}
+
 CozipIndex ReadCozipIndex(FileHandle &handle, const string &source) {
 	auto file_size = (idx_t)handle.GetFileSize();
 	CheckMinimumSize(file_size, source);
@@ -82,8 +168,8 @@ CozipIndex ReadCozipIndex(FileHandle &handle, const string &source) {
 	index.version = ReadU16LE(head.data() + COZIP_LFH_SIZE + 4);
 
 	auto payload_size = (idx_t)ReadU32LE(head.data() + 18);
-	if (payload_size == 0) {
-		throw InvalidInputException("cozip index payload size is zero: %s", source);
+	if (payload_size < COZIP_INDEX_HEADER_SIZE) {
+		throw InvalidInputException("cozip index payload is smaller than its own header: %s", source);
 	}
 	auto payload_end = COZIP_LFH_SIZE + payload_size;
 	if (payload_end > file_size) {
@@ -97,6 +183,8 @@ CozipIndex ReadCozipIndex(FileHandle &handle, const string &source) {
 	}
 
 	auto payload = head.data() + COZIP_LFH_SIZE;
+	VerifyIntegrityHash(handle, payload, payload_size, file_size, ReadU64LE(head.data() + 43), source);
+
 	auto count = (idx_t)ReadU32LE(payload + 7);
 	// Every entry costs at least 18 bytes of fixed width plus one name byte.
 	if (count > payload_size / (COZIP_INDEX_PER_ENTRY_MIN)) {
@@ -137,6 +225,19 @@ CozipIndex ReadCozipIndex(FileHandle &handle, const string &source) {
 		}
 		index.entries[i].size = ReadU64LE(cursor);
 		cursor += 8;
+	}
+	if (cursor != limit) {
+		throw InvalidInputException("cozip index sections do not match its declared size: %s", source);
+	}
+	// cozip spec 5.3 and 7.3. The 1.1.0 spec restricts names to ASCII, so a
+	// reader has to reject the rest rather than pass them to the filesystem.
+	unordered_set<string> seen;
+	seen.reserve(index.entries.size());
+	for (auto &entry : index.entries) {
+		ValidateIndexName(entry.name, source);
+		if (!seen.insert(entry.name).second) {
+			throw InvalidInputException("cozip index lists '%s' twice: %s", entry.name, source);
+		}
 	}
 	// cozip spec 7.5: a reader should reject ranges that leave the archive.
 	for (auto &entry : index.entries) {
