@@ -1,5 +1,61 @@
 # Changelog
 
+## v2.0.0
+
+### Added
+
+- `read_taco(path)` reads a TACO dataset. The default shape is one row per
+  sample with one column per file of the sample's contract, named by the
+  contract path and holding a GDAL `/vsisubfile/` pointer. `pivoted := false`
+  gives one row per file with the metadata of every level it belongs to.
+- All three TACO containers behind the same function: a `.zip` archive, a
+  FOLDER directory, and a `.tacocat/` directory with consolidated metadata.
+  TACOCAT results carry `source_file`, since sample ids restart per ZIP.
+- A variable leaf, declared `prefix*[a,b].ext`, becomes one `LIST(VARCHAR)`
+  column named after the prefix and ordered by the cardinal index.
+- `idx` limits samples, `files` limits paths before the pivot, and `level`
+  reads one metadata Parquet directly.
+- `taco_contract()`, `taco_structure()`, `taco_levels()` and
+  `taco_collection()` expose the contract without loading the json extension.
+- `taco_sql()` returns the generated query, for debugging.
+- A field name declared at two contract levels no longer collides. The row
+  carries the value of the level it belongs to, and the shallower declaration
+  is hidden, so `sample/before.resolution` wins over `sample.resolution` for a
+  file under `before/`.
+- Test fixtures for every shape the reader supports: flat, hierarchical,
+  variable-leaf and null-structure archives, plus FOLDER and TACOCAT
+  directories. `test/generate_taco_fixtures.py` rebuilds them.
+
+### Changed
+
+- `read_cozip` is now `read_flat`. The old name stays as a deprecated alias
+  and will be removed in 3.0. Naming the readers after the profile they read
+  makes the pair `read_flat` / `read_taco` obvious; `read_cozip` did not say
+  which profile it handled, and a TACO archive is just as much a cozip.
+- `read_flat` names the profile it found when handed the wrong one, and
+  points at `read_taco`.
+- The byte-0 index parser moved to `src/cozip_index.cpp` and now returns every
+  priority entry from a single read, instead of looking up one fixed name. It
+  also rejects entries whose byte range falls outside the archive, per cozip
+  spec 7.5.
+- `COLLECTION.json` is parsed with the yyjson that DuckDB already vendors and
+  links, rather than a hand-written scanner.
+- Test fixtures use the `.zip` extension, per cozip spec 13.4. The profile
+  byte in the index is the authoritative signal; the file name never was.
+
+### Removed
+
+- WebAssembly builds. Browser users can use the JavaScript reader in the
+  cozip repository.
+
+### Notes
+
+- TACO spec 8.2 calls the shape parameter `pivot`. DuckDB reserves that word
+  for the `PIVOT` statement, so the reader spells it `pivoted`.
+- The spec also describes `INSTALL taco FROM community`. Both readers ship in
+  this one extension, because two extensions registering the same
+  `cozip-subfile://` filesystem would collide when a user loads both.
+
 ## v1.3.0 — 2026-09-02
 
 ### Added
@@ -10,7 +66,7 @@
 ### Changed
 
 - The documented contract is explicitly Flat-only: `read_cozip()` rejects
-  TACO-profile `.tacozip` containers before attempting Parquet access.
+  TACO-profile containers before attempting Parquet access.
 
 ## v1.2.0 — 2026-05-14
 
