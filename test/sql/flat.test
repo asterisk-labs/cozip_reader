@@ -1,0 +1,142 @@
+# name: test/sql/flat.test
+# group: [sql]
+
+require cozip
+
+require parquet
+
+
+# flat_simple
+
+query T
+SELECT cozip_profile('test/data/flat_simple.zip');
+----
+flat
+
+query I
+SELECT count(*) FROM read_flat('test/data/flat_simple.zip');
+----
+4
+
+query TT
+SELECT "name", "category" FROM read_flat('test/data/flat_simple.zip', gdal_vsi := false)
+ORDER BY "name";
+----
+denver.txt	text
+lima.txt	text
+paris.txt	text
+tokyo.txt	text
+
+query II
+SELECT count(*), sum("size") > 0
+FROM read_flat('test/data/flat_simple.zip', gdal_vsi := false);
+----
+4	true
+
+query I
+SELECT bool_and("offset" > prev) FROM (
+  SELECT "offset", LAG("offset") OVER (ORDER BY "offset") AS prev
+  FROM read_flat('test/data/flat_simple.zip', gdal_vsi := false)
+) t
+WHERE prev IS NOT NULL;
+----
+true
+
+query I
+SELECT count(*) FROM read_flat('test/data/flat_simple.zip')
+WHERE "cozip:gdal_vsi" LIKE '/vsisubfile/%,test/data/flat_simple.zip';
+----
+4
+
+query I
+SELECT count(*) FROM read_flat('test/data/flat_simple.zip')
+WHERE "cozip:gdal_vsi" = '/vsisubfile/' || "offset"::VARCHAR || '_' || "size"::VARCHAR || ',test/data/flat_simple.zip';
+----
+4
+
+query I
+SELECT count(*) FROM read_flat('test/data/flat_simple.zip')
+WHERE "cozip:gdal_vsi" LIKE '%/vsicurl/%';
+----
+0
+
+query III nosort same_rows
+SELECT "name", "offset", "size" FROM read_flat('test/data/flat_simple.zip', gdal_vsi := false)
+ORDER BY "name";
+----
+
+query III nosort same_rows
+SELECT "name", "offset", "size" FROM read_flat('test/data/flat_simple.zip', gdal_vsi := false)
+ORDER BY "name";
+----
+
+
+# flat_geo
+# geometry comes back as GEOMETRY — read_parquet honours GeoParquet metadata
+
+query I
+SELECT count(*) FROM read_flat('test/data/flat_geo.zip');
+----
+4
+
+query I
+SELECT count(*) FROM read_flat('test/data/flat_geo.zip', gdal_vsi := false)
+WHERE "geometry" IS NOT NULL;
+----
+4
+
+query TT
+SELECT "name", "category" FROM read_flat('test/data/flat_geo.zip', gdal_vsi := false)
+ORDER BY "name";
+----
+denver.txt	text
+lima.txt	text
+paris.txt	text
+tokyo.txt	text
+
+statement ok
+CREATE TEMP TABLE want(name VARCHAR);
+
+statement ok
+INSERT INTO want VALUES ('lima.txt'), ('tokyo.txt');
+
+query T
+SELECT c."name" FROM read_flat('test/data/flat_geo.zip', gdal_vsi := false) c
+JOIN want w ON c."name" = w."name"
+ORDER BY c."name";
+----
+lima.txt
+tokyo.txt
+
+
+# errors
+
+statement error
+SELECT * FROM read_flat(NULL);
+----
+cannot take NULL
+
+# The deprecated alias still resolves to the same manifest.
+
+query I
+SELECT count(*) FROM read_cozip('test/data/flat_simple.zip');
+----
+4
+
+# A TACO archive is a valid cozip, so the reader has to name the profile
+# rather than fail with a parse error.
+
+statement error
+SELECT * FROM read_flat('test/data/taco_flat.zip');
+----
+Got profile=taco
+
+statement error
+SELECT * FROM read_flat('test/sql/flat.test');
+----
+cozip archive too small
+
+statement error
+SELECT * FROM read_flat('test/data/does_not_exist.cozip');
+----
+Cannot open file

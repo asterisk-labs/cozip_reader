@@ -1,0 +1,98 @@
+{
+  "id": "taco-cat",
+  "dataset_version": "1.0.0",
+  "description": "Partitioned TACO fixture",
+  "licenses": [
+    "CC-BY-4.0"
+  ],
+  "providers": [
+    {
+      "name": "Asterisk Labs",
+      "roles": [
+        "producer"
+      ]
+    }
+  ],
+  "tasks": [
+    "segmentation"
+  ],
+  "title": "Partitioned TACO fixture",
+  "extent": {
+    "spatial": [
+      -104.99,
+      -12.05,
+      2.35,
+      48.86
+    ],
+    "temporal": [
+      "2024-01-01T00:00:00Z",
+      "2024-01-06T00:00:00Z"
+    ]
+  },
+  "taco:structure": [
+    "image.bin"
+  ],
+  "taco:metadata": {
+    "collection": {
+      "stac:centroid": [
+        "binary",
+        "Center point in EPSG:4326 (WKB)"
+      ],
+      "stac:time_start": [
+        "timestamp[us]",
+        "Acquisition start (UTC)"
+      ],
+      "split": [
+        "string",
+        "Dataset split"
+      ],
+      "cloud_cover": [
+        "double",
+        "Cloud cover percentage"
+      ]
+    },
+    "sample": {
+      "role": [
+        "string",
+        "Asset role"
+      ]
+    }
+  },
+  "taco:sources": {
+    "count": 2,
+    "files": [
+      "part_train.zip",
+      "part_val.zip"
+    ],
+    "extents": [
+      {
+        "file": "part_train.zip",
+        "samples": 3,
+        "spatial": [
+          139.69,
+          -12.05,
+          -77.04000000000002,
+          35.69
+        ],
+        "temporal": [
+          "2024-01-01T00:00:00Z",
+          "2024-01-05T00:00:00Z"
+        ]
+      },
+      {
+        "file": "part_val.zip",
+        "samples": 3,
+        "spatial": [
+          -104.99,
+          39.74,
+          2.35,
+          48.86
+        ],
+        "temporal": [
+          "2024-01-02T00:00:00Z",
+          "2024-01-06T00:00:00Z"
+        ]
+      }
+    ]
+  }
+}

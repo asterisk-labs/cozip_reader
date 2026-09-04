@@ -2,8 +2,8 @@
 
 Produces two archives under test/data/.
 
-  flat_simple.cozip   plain metadata (name, offset, size, category)
-  flat_geo.cozip      GeoParquet metadata (adds a Point geometry column)
+  flat_simple.zip   plain metadata (name, offset, size, category)
+  flat_geo.zip      GeoParquet metadata (adds a Point geometry column)
 
 The 4 inner files together fit comfortably above the cozip 1.0 minimum
 size of 32 KiB + 51 bytes, so the produced archives are valid without
@@ -104,11 +104,11 @@ def main() -> None:
         tmp_root = Path(tmp)
         inputs = write_inputs(tmp_root)
 
-        simple_out = DATA_DIR / "flat_simple.cozip"
+        simple_out = DATA_DIR / "flat_simple.zip"
         build_simple(simple_out, inputs)
         print(f"wrote {simple_out.relative_to(THIS_DIR.parent)} " f"({simple_out.stat().st_size} bytes)")
 
-        geo_out = DATA_DIR / "flat_geo.cozip"
+        geo_out = DATA_DIR / "flat_geo.zip"
         build_geo(geo_out, inputs, tmp_root)
         print(f"wrote {geo_out.relative_to(THIS_DIR.parent)} " f"({geo_out.stat().st_size} bytes)")
 
