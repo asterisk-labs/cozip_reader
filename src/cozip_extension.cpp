@@ -1,15 +1,19 @@
-// read_cozip table macro: composes read_parquet over a cozip-subfile://
-// virtual path resolved by CozipSubFileSystem. Plus two scalar helpers
-// (cozip_offset_size, cozip_vsi_base) used by the macro body.
+// The cozip DuckDB extension.
 //
-// WASM side-module constraint: avoid template paths whose instantiations
-// duckdb-eh.wasm does not export — single-string throws, FlatVector loops
-// (not UnaryExecutor), Parser+RegisterFunction (not Connection::Query).
+// Two readers, one per cozip profile:
+//   read_flat(path)   profile 1, the __metadata__ manifest, one row per entry
+//   read_taco(path)   profile 2, a TACO dataset, one row per sample
+//
+// Both are SQL macros over read_parquet. C++ only reads bytes at fixed
+// offsets: the byte-0 index, and COLLECTION.json. No Parquet is ever parsed
+// here; DuckDB handles the columnar work.
 
 #define DUCKDB_EXTENSION_MAIN
 
 #include "cozip_extension.hpp"
+#include "cozip_index.hpp"
 #include "cozip_subfile_fs.hpp"
+#include "taco_sql.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
@@ -18,240 +22,70 @@
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/parsed_data/create_macro_info.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 
-#include <cstring>
 #include <string>
 #include <vector>
 
 namespace duckdb {
 
-static constexpr uint32_t ZIP_LFH_SIGNATURE = 0x04034B50U;
-static constexpr idx_t COZIP_LFH_SIZE = 51;
-static constexpr idx_t COZIP_INDEX_HEADER_SIZE = 11;
-static constexpr idx_t COZIP_HASH_WINDOW_SIZE = 32768;
-static constexpr idx_t COZIP_MIN_SIZE = COZIP_LFH_SIZE + COZIP_HASH_WINDOW_SIZE;
-static constexpr idx_t COZIP_BOOTSTRAP_SIZE = 65536;
-static constexpr uint16_t COZIP_EXTRA_HEADER_ID = 0xCA0C;
-static constexpr uint8_t COZIP_PROFILE_FLAT = 1;
-static constexpr uint8_t COZIP_PROFILE_TACO = 2;
-static constexpr uint16_t COZIP_FORMAT_VERSION = 1;
+static const char *FLAT_METADATA_NAME = "__metadata__";
 
-static const std::string COZIP_INDEX_NAME = "__cozip__";
-static const std::string COZIP_METADATA_NAME = "__metadata__";
-
-static inline uint16_t ReadU16LE(const uint8_t *p) {
-	return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-static inline uint32_t ReadU32LE(const uint8_t *p) {
-	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-static inline uint64_t ReadU64LE(const uint8_t *p) {
-	return (uint64_t)ReadU32LE(p) | ((uint64_t)ReadU32LE(p + 4) << 32);
+static unique_ptr<FileHandle> OpenSource(ClientContext &context, const string &path, const char *function_name) {
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+	if (!handle) {
+		throw IOException("%s: could not open %s", function_name, path);
+	}
+	return handle;
 }
 
-struct CozipMetadataEntry {
-	uint64_t offset;
-	uint64_t size;
-};
-
-static uint8_t ParseCozipProfilePrefix(const uint8_t *head, idx_t size, const std::string &source) {
-	if (size < COZIP_LFH_SIZE + 7) {
-		throw InvalidInputException(std::string("cozip profile prefix is truncated: ") + source);
-	}
-	if (ReadU32LE(head) != ZIP_LFH_SIGNATURE) {
-		throw InvalidInputException(std::string("byte 0 is not a ZIP Local File Header: ") + source);
-	}
-	if (ReadU16LE(head + 8) != 0) {
-		throw InvalidInputException(std::string("__cozip__ compression method is not STORE: ") + source);
-	}
-	auto name_len = ReadU16LE(head + 26);
-	auto extra_len = ReadU16LE(head + 28);
-	if (name_len != 9 || extra_len != 12) {
-		throw InvalidInputException(std::string("LFH does not match cozip layout: ") + source);
-	}
-	if (memcmp(head + 30, COZIP_INDEX_NAME.data(), 9) != 0) {
-		throw InvalidInputException(std::string("first ZIP entry is not __cozip__: ") + source);
-	}
-	if (ReadU16LE(head + 39) != COZIP_EXTRA_HEADER_ID || ReadU16LE(head + 41) != 8) {
-		throw InvalidInputException(std::string("cozip integrity extra field (0xCA0C) missing: ") + source);
-	}
-
-	auto pp = head + COZIP_LFH_SIZE;
-	if (memcmp(pp, "CZIP", 4) != 0) {
-		throw InvalidInputException(std::string("index payload magic is not 'CZIP': ") + source);
-	}
-	auto version = ReadU16LE(pp + 4);
-	if (version > COZIP_FORMAT_VERSION) {
-		throw InvalidInputException(std::string("unsupported cozip format version ") + std::to_string((int)version) +
-		                            ": " + source);
-	}
-	return pp[6];
-}
-
-static CozipMetadataEntry ParseCozipMetadataLocation(FileHandle &handle, const std::string &source) {
-	auto file_size = (idx_t)handle.GetFileSize();
-	if (file_size < COZIP_MIN_SIZE) {
-		throw InvalidInputException(std::string("cozip archive too small (minimum is ") +
-		                            std::to_string(COZIP_MIN_SIZE) + " bytes): " + source);
-	}
-
-	auto bootstrap = std::min<idx_t>(COZIP_BOOTSTRAP_SIZE, file_size);
-	std::vector<uint8_t> head(bootstrap);
-	handle.Read(head.data(), bootstrap, 0);
-	auto profile = ParseCozipProfilePrefix(head.data(), head.size(), source);
-
-	auto index_payload_size = (idx_t)ReadU32LE(head.data() + 18);
-	if (index_payload_size == 0) {
-		throw InvalidInputException(std::string("cozip index payload size is zero: ") + source);
-	}
-	auto index_payload_end = COZIP_LFH_SIZE + index_payload_size;
-	if (index_payload_end > file_size) {
-		throw InvalidInputException(std::string("cozip index payload is truncated: ") + source);
-	}
-
-	if (index_payload_end > head.size()) {
-		auto extra = index_payload_end - head.size();
-		std::vector<uint8_t> tail(extra);
-		handle.Read(tail.data(), extra, head.size());
-		head.insert(head.end(), tail.begin(), tail.end());
-	}
-
-	if (profile != COZIP_PROFILE_FLAT) {
-		throw InvalidInputException(std::string("read_cozip only supports the Flat profile (profile=1). Got profile=") +
-		                            std::to_string((int)profile) + " in: " + source);
-	}
-	auto pp = head.data() + COZIP_LFH_SIZE;
-	auto n_entries = (idx_t)ReadU32LE(pp + 7);
-
-	auto cur = pp + COZIP_INDEX_HEADER_SIZE;
-	std::vector<uint16_t> name_lens(n_entries);
-	for (idx_t i = 0; i < n_entries; i++) {
-		name_lens[i] = ReadU16LE(cur);
-		cur += 2;
-	}
-	std::vector<std::string> names(n_entries);
-	for (idx_t i = 0; i < n_entries; i++) {
-		names[i] = std::string((const char *)cur, name_lens[i]);
-		cur += name_lens[i];
-	}
-	std::vector<uint64_t> offsets(n_entries);
-	for (idx_t i = 0; i < n_entries; i++) {
-		offsets[i] = ReadU64LE(cur);
-		cur += 8;
-	}
-	std::vector<uint64_t> sizes(n_entries);
-	for (idx_t i = 0; i < n_entries; i++) {
-		sizes[i] = ReadU64LE(cur);
-		cur += 8;
-	}
-
-	for (idx_t i = 0; i < n_entries; i++) {
-		if (names[i] == COZIP_METADATA_NAME) {
-			return CozipMetadataEntry {offsets[i], sizes[i]};
-		}
-	}
-	throw InvalidInputException(std::string("Flat-profile cozip is missing __metadata__ entry: ") + source);
-}
-
-static std::string BuildVsiBase(const std::string &path) {
-	if (StringUtil::StartsWith(path, "https://") || StringUtil::StartsWith(path, "http://")) {
-		return "/vsicurl/" + path;
-	}
-	if (StringUtil::StartsWith(path, "s3://")) {
-		return "/vsis3/" + path.substr(5);
-	}
-	if (StringUtil::StartsWith(path, "gcs://")) {
-		return "/vsigs/" + path.substr(6);
-	}
-	if (StringUtil::StartsWith(path, "gs://")) {
-		return "/vsigs/" + path.substr(5);
-	}
-	if (StringUtil::StartsWith(path, "abfss://")) {
-		return "/vsiadls/" + path.substr(8);
-	}
-	if (StringUtil::StartsWith(path, "azure://")) {
-		return "/vsiaz/" + path.substr(8);
-	}
-	if (StringUtil::StartsWith(path, "hf://")) {
-		auto rest = path.substr(5);
-		std::string ns_prefix;
-		if (StringUtil::StartsWith(rest, "datasets/")) {
-			ns_prefix = "datasets/";
-			rest = rest.substr(9);
-		} else if (StringUtil::StartsWith(rest, "spaces/")) {
-			ns_prefix = "spaces/";
-			rest = rest.substr(7);
-		}
-		auto sl1 = rest.find('/');
-		auto sl2 = (sl1 == std::string::npos) ? std::string::npos : rest.find('/', sl1 + 1);
-		if (sl1 == std::string::npos || sl2 == std::string::npos) {
-			throw InvalidInputException(std::string("cannot parse hf:// URL for VSI mapping: ") + path);
-		}
-		auto owner_repo = rest.substr(0, sl2);
-		auto inner = rest.substr(sl2 + 1);
-		return "/vsicurl/https://huggingface.co/" + ns_prefix + owner_repo + "/resolve/main/" + inner;
-	}
-	return path;
-}
-
+//! Applies `body` to every row of a single VARCHAR argument.
 template <typename Body>
-static void StringScalarLoop(DataChunk &args, Vector &result, const char *fn, Body body) {
+static void StringScalarLoop(DataChunk &args, Vector &result, const char *function_name, Body body) {
 	auto count = args.size();
+	auto constant = args.data[0].GetVectorType() == VectorType::CONSTANT_VECTOR;
 	args.data[0].Flatten(count);
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 
-	auto src = FlatVector::GetData<string_t>(args.data[0]);
-	auto dst = FlatVector::GetData<string_t>(result);
-	auto &src_valid = FlatVector::Validity(args.data[0]);
+	auto source = FlatVector::GetData<string_t>(args.data[0]);
+	auto target = FlatVector::GetData<string_t>(result);
+	auto &validity = FlatVector::Validity(args.data[0]);
 
-	for (idx_t i = 0; i < count; i++) {
-		if (!src_valid.RowIsValid(i)) {
-			throw InvalidInputException(std::string(fn) + ": path argument is NULL");
+	for (idx_t i = 0; i < (constant ? 1 : count); i++) {
+		if (!validity.RowIsValid(i)) {
+			throw InvalidInputException("%s: path argument is NULL", function_name);
 		}
-		dst[i] = StringVector::AddString(result, body(std::string(src[i].GetString())));
+		target[i] = StringVector::AddString(result, body(source[i].GetString()));
+	}
+	if (constant) {
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
 	}
 }
 
+// Locates the Flat manifest. Kept as its own scalar because the read_flat
+// macro splices the result straight into a cozip-subfile:// path.
 static void CozipOffsetSizeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &fs = FileSystem::GetFileSystem(state.GetContext());
-	StringScalarLoop(args, result, "cozip_offset_size", [&](const std::string &path) {
-		auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-		if (!handle) {
-			throw IOException(std::string("cozip_offset_size: could not open ") + path);
+	auto &context = state.GetContext();
+	StringScalarLoop(args, result, "cozip_offset_size", [&](const string &path) {
+		auto handle = OpenSource(context, path, "cozip_offset_size");
+		auto index = ReadCozipIndex(*handle, path);
+		if (index.profile != COZIP_PROFILE_FLAT) {
+			throw InvalidInputException("read_flat needs a Flat-profile archive (profile=1). Got profile=%s in: %s. "
+			                            "Use read_taco() for a TACO dataset.",
+			                            ProfileName(index.profile), path);
 		}
-		auto md = ParseCozipMetadataLocation(*handle, path);
-		return std::to_string(md.offset) + "_" + std::to_string(md.size);
+		return index.OffsetSize(FLAT_METADATA_NAME, path);
 	});
 }
 
 static void CozipProfileFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &fs = FileSystem::GetFileSystem(state.GetContext());
-	StringScalarLoop(args, result, "cozip_profile", [&](const std::string &path) {
-		auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-		if (!handle) {
-			throw IOException(std::string("cozip_profile: could not open ") + path);
-		}
-		auto file_size = (idx_t)handle->GetFileSize();
-		if (file_size < COZIP_MIN_SIZE) {
-			throw InvalidInputException(std::string("cozip archive too small (minimum is ") +
-			                            std::to_string(COZIP_MIN_SIZE) + " bytes): " + path);
-		}
-		std::vector<uint8_t> prefix(COZIP_LFH_SIZE + 7);
-		handle->Read(prefix.data(), prefix.size(), 0);
-		auto profile = ParseCozipProfilePrefix(prefix.data(), prefix.size(), path);
-		switch (profile) {
-		case 0:
-			return std::string("none");
-		case COZIP_PROFILE_FLAT:
-			return std::string("flat");
-		case COZIP_PROFILE_TACO:
-			return std::string("taco");
-		default:
-			return std::string("unknown:") + std::to_string((int)profile);
-		}
+	auto &context = state.GetContext();
+	StringScalarLoop(args, result, "cozip_profile", [&](const string &path) {
+		auto handle = OpenSource(context, path, "cozip_profile");
+		return ProfileName(ReadCozipProfile(*handle, path));
 	});
 }
 
@@ -259,47 +93,221 @@ static void CozipVsiBaseFunction(DataChunk &args, ExpressionState &, Vector &res
 	StringScalarLoop(args, result, "cozip_vsi_base", BuildVsiBase);
 }
 
-// The macro always emits a cozip:gdal_vsi column. When gdal_vsi is false
-// the value is NULL; CASE short-circuits so cozip_vsi_base is not called.
-static const char *kReadCozipMacro = R"sql(
-CREATE OR REPLACE MACRO read_cozip(p, gdal_vsi := true) AS TABLE
+static void TacoCollectionFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &context = state.GetContext();
+	StringScalarLoop(args, result, "taco_collection", [&](const string &path) {
+		auto layout = ResolveTacoLayout(context, path);
+		auto handle = OpenSource(context, layout.collection_uri, "taco_collection");
+		auto size = (idx_t)handle->GetFileSize();
+		string content(size, '\0');
+		if (size > 0) {
+			handle->Read((void *)content.data(), size, 0);
+		}
+		return content;
+	});
+}
+
+//! Fills one LIST(VARCHAR) result row from a vector of strings.
+static void SetStringList(Vector &result, idx_t row, const vector<string> &values) {
+	auto entries = FlatVector::GetData<list_entry_t>(result);
+	entries[row].offset = ListVector::GetListSize(result);
+	entries[row].length = values.size();
+	ListVector::Reserve(result, entries[row].offset + values.size());
+	auto &child = ListVector::GetEntry(result);
+	auto child_data = FlatVector::GetData<string_t>(child);
+	for (idx_t i = 0; i < values.size(); i++) {
+		child_data[entries[row].offset + i] = StringVector::AddString(child, values[i]);
+	}
+	ListVector::SetListSize(result, entries[row].offset + values.size());
+}
+
+template <typename Body>
+static void StringListScalarLoop(DataChunk &args, Vector &result, const char *function_name, Body body) {
+	auto count = args.size();
+	auto constant = args.data[0].GetVectorType() == VectorType::CONSTANT_VECTOR;
+	args.data[0].Flatten(count);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	ListVector::SetListSize(result, 0);
+
+	auto source = FlatVector::GetData<string_t>(args.data[0]);
+	auto &validity = FlatVector::Validity(args.data[0]);
+	for (idx_t i = 0; i < (constant ? 1 : count); i++) {
+		if (!validity.RowIsValid(i)) {
+			throw InvalidInputException("%s: path argument is NULL", function_name);
+		}
+		SetStringList(result, i, body(source[i].GetString()));
+	}
+	if (constant) {
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	}
+}
+
+static void TacoStructureFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &context = state.GetContext();
+	StringListScalarLoop(args, result, "taco_structure", [&](const string &path) {
+		auto layout = ResolveTacoLayout(context, path);
+		return ReadTacoStructure(context, layout);
+	});
+}
+
+static void TacoLevelsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &context = state.GetContext();
+	StringListScalarLoop(args, result, "taco_levels",
+	                     [&](const string &path) { return ResolveTacoLayout(context, path).level_names; });
+}
+
+//! Reads one optional VARCHAR argument, returning "" when it is NULL.
+static string OptionalString(DataChunk &args, idx_t column, idx_t row) {
+	auto &vector = args.data[column];
+	UnifiedVectorFormat format;
+	vector.ToUnifiedFormat(args.size(), format);
+	auto index = format.sel->get_index(row);
+	if (!format.validity.RowIsValid(index)) {
+		return string();
+	}
+	return UnifiedVectorFormat::GetData<string_t>(format)[index].GetString();
+}
+
+static bool OptionalBool(DataChunk &args, idx_t column, idx_t row, bool fallback) {
+	UnifiedVectorFormat format;
+	args.data[column].ToUnifiedFormat(args.size(), format);
+	auto index = format.sel->get_index(row);
+	if (!format.validity.RowIsValid(index)) {
+		return fallback;
+	}
+	return UnifiedVectorFormat::GetData<bool>(format)[index];
+}
+
+static bool OptionalStringList(DataChunk &args, idx_t column, idx_t row, vector<string> &out) {
+	auto &vector = args.data[column];
+	UnifiedVectorFormat format;
+	vector.ToUnifiedFormat(args.size(), format);
+	auto index = format.sel->get_index(row);
+	if (!format.validity.RowIsValid(index)) {
+		return false;
+	}
+	auto entry = UnifiedVectorFormat::GetData<list_entry_t>(format)[index];
+	auto &child = ListVector::GetEntry(vector);
+	UnifiedVectorFormat child_format;
+	child.ToUnifiedFormat(ListVector::GetListSize(vector), child_format);
+	auto child_data = UnifiedVectorFormat::GetData<string_t>(child_format);
+	for (idx_t i = 0; i < entry.length; i++) {
+		auto child_index = child_format.sel->get_index(entry.offset + i);
+		if (!child_format.validity.RowIsValid(child_index)) {
+			throw InvalidInputException("read_taco: files must not contain NULL");
+		}
+		out.push_back(child_data[child_index].GetString());
+	}
+	return true;
+}
+
+// Resolves a TACO container and returns the query used by read_taco.
+static void TacoSqlFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &context = state.GetContext();
+	auto count = args.size();
+	bool constant = true;
+	for (idx_t i = 0; i < args.ColumnCount(); i++) {
+		constant = constant && args.data[i].GetVectorType() == VectorType::CONSTANT_VECTOR;
+	}
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	args.data[0].Flatten(count);
+	auto paths = FlatVector::GetData<string_t>(args.data[0]);
+	auto &path_validity = FlatVector::Validity(args.data[0]);
+	auto target = FlatVector::GetData<string_t>(result);
+
+	for (idx_t row = 0; row < (constant ? 1 : count); row++) {
+		if (!path_validity.RowIsValid(row)) {
+			throw InvalidInputException("read_taco: path argument is NULL");
+		}
+		TacoOptions options;
+		options.idx = OptionalString(args, 1, row);
+		options.level = OptionalString(args, 2, row);
+		options.pivot = OptionalBool(args, 3, row, true);
+		options.has_files = OptionalStringList(args, 4, row, options.files);
+		options.gdal_vsi = OptionalBool(args, 5, row, true);
+		target[row] = StringVector::AddString(result, BuildTacoSQL(context, paths[row].GetString(), options));
+	}
+	if (constant) {
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	}
+}
+
+// read_flat keeps the shape read_cozip has always had: one row per archive
+// entry, plus the GDAL path. read_cozip stays as a deprecated alias.
+static const char *FLAT_MACRO_BODY = R"sql(
 SELECT *,
   CASE WHEN gdal_vsi
        THEN '/vsisubfile/' || "offset" || '_' || "size" || ',' || cozip_vsi_base(p)
        ELSE NULL
   END AS "cozip:gdal_vsi"
-FROM read_parquet('cozip-subfile://' || cozip_offset_size(p) || '!' || p);
+FROM read_parquet('cozip-subfile://' || cozip_offset_size(p) || '!' || p)
 )sql";
 
-static void LoadInternal(ExtensionLoader &loader) {
-	auto &db = loader.GetDatabaseInstance();
+static const char *TACO_MACRO_BODY = R"sql(
+SELECT * FROM query(taco_sql(p, CAST(idx AS VARCHAR), level, pivoted, files, gdal_vsi))
+)sql";
 
-	db.GetFileSystem().RegisterSubSystem(make_uniq<CozipSubFileSystem>());
+static const char *CONTRACT_MACRO_BODY = R"sql(
+SELECT 'structure' AS kind, unnest(taco_structure(p)) AS value
+UNION ALL
+SELECT 'level' AS kind, unnest(taco_levels(p)) AS value
+)sql";
 
-	ScalarFunction offset_size_fn("cozip_offset_size", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
-	                              CozipOffsetSizeFunction);
-	loader.RegisterFunction(offset_size_fn);
-
-	ScalarFunction profile_fn("cozip_profile", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipProfileFunction);
-	loader.RegisterFunction(profile_fn);
-
-	ScalarFunction vsi_base_fn("cozip_vsi_base", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipVsiBaseFunction);
-	loader.RegisterFunction(vsi_base_fn);
-
-	// schema="main" + internal=true are required: ExtensionLoader installs
-	// into the system catalog, which only accepts internal entries, and
-	// the Parser leaves both fields default. Built-in DuckDB macros set
-	// both the same way.
+//! Registers one table macro. ExtensionLoader installs into the system
+//! catalog, which only accepts internal entries in the main schema; the
+//! Parser leaves both fields default, so they are set here.
+static void RegisterTableMacro(ExtensionLoader &loader, const string &signature, const string &body) {
 	Parser parser;
-	parser.ParseQuery(kReadCozipMacro);
+	parser.ParseQuery("CREATE OR REPLACE MACRO " + signature + " AS TABLE " + body + ";");
 	if (parser.statements.empty()) {
-		throw IOException("cozip: read_cozip macro SQL produced no statements");
+		throw IOException("cozip: macro SQL produced no statements: %s", signature);
 	}
-	auto &create_stmt = static_cast<CreateStatement &>(*parser.statements[0]);
-	auto &macro_info = static_cast<CreateMacroInfo &>(*create_stmt.info);
+	auto &create_statement = static_cast<CreateStatement &>(*parser.statements[0]);
+	auto &macro_info = static_cast<CreateMacroInfo &>(*create_statement.info);
 	macro_info.schema = "main";
 	macro_info.internal = true;
 	loader.RegisterFunction(macro_info);
+}
+
+static void LoadInternal(ExtensionLoader &loader) {
+	auto &db = loader.GetDatabaseInstance();
+	db.GetFileSystem().RegisterSubSystem(make_uniq<CozipSubFileSystem>());
+
+	loader.RegisterFunction(
+	    ScalarFunction("cozip_offset_size", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipOffsetSizeFunction));
+	loader.RegisterFunction(
+	    ScalarFunction("cozip_profile", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipProfileFunction));
+	loader.RegisterFunction(
+	    ScalarFunction("cozip_vsi_base", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipVsiBaseFunction));
+	ScalarFunction taco_collection("taco_collection", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                               TacoCollectionFunction);
+	taco_collection.stability = FunctionStability::CONSISTENT_WITHIN_QUERY;
+	loader.RegisterFunction(taco_collection);
+	ScalarFunction taco_structure("taco_structure", {LogicalType::VARCHAR}, LogicalType::LIST(LogicalType::VARCHAR),
+	                              TacoStructureFunction);
+	taco_structure.stability = FunctionStability::CONSISTENT_WITHIN_QUERY;
+	loader.RegisterFunction(taco_structure);
+	ScalarFunction taco_levels("taco_levels", {LogicalType::VARCHAR}, LogicalType::LIST(LogicalType::VARCHAR),
+	                           TacoLevelsFunction);
+	taco_levels.stability = FunctionStability::CONSISTENT_WITHIN_QUERY;
+	loader.RegisterFunction(taco_levels);
+
+	ScalarFunction taco_sql("taco_sql",
+	                        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN,
+	                         LogicalType::LIST(LogicalType::VARCHAR), LogicalType::BOOLEAN},
+	                        LogicalType::VARCHAR, TacoSqlFunction);
+	taco_sql.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	taco_sql.stability = FunctionStability::CONSISTENT_WITHIN_QUERY;
+	loader.RegisterFunction(taco_sql);
+
+	RegisterTableMacro(loader, "read_flat(p, gdal_vsi := true)", FLAT_MACRO_BODY);
+	RegisterTableMacro(loader, "read_cozip(p, gdal_vsi := true)", FLAT_MACRO_BODY);
+	// TACO spec 8.2 calls this parameter "pivot"; DuckDB reserves that word
+	// for the PIVOT statement, so the reader spells it "pivoted".
+	RegisterTableMacro(loader,
+	                   "read_taco(p, idx := NULL, level := NULL, pivoted := true, files := NULL, gdal_vsi := true)",
+	                   TACO_MACRO_BODY);
+	RegisterTableMacro(loader, "taco_contract(p)", CONTRACT_MACRO_BODY);
 }
 
 void CozipExtension::Load(ExtensionLoader &loader) {

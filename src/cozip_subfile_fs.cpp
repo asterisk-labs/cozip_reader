@@ -94,18 +94,20 @@ unique_ptr<FileHandle> CozipSubFileSystem::OpenFile(const string &path, FileOpen
 
 void CozipSubFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
 	auto &h = static_cast<CozipSubFileHandle &>(handle);
-	if (location >= h.sub_size) {
+	if (nr_bytes < 0 || location > h.sub_size || static_cast<uint64_t>(nr_bytes) > h.sub_size - location) {
+		throw IOException("cannot read outside cozip subfile: " + handle.path);
+	}
+	if (nr_bytes == 0) {
 		return;
 	}
-	auto to_read = MinValue(static_cast<idx_t>(nr_bytes), h.sub_size - location);
-	if (to_read == 0) {
-		return;
-	}
-	(*h.inner_handle).Read(buffer, static_cast<int64_t>(to_read), location + h.base_offset);
+	(*h.inner_handle).Read(buffer, nr_bytes, location + h.base_offset);
 }
 
 int64_t CozipSubFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
 	auto &h = static_cast<CozipSubFileHandle &>(handle);
+	if (nr_bytes < 0) {
+		throw IOException("cannot read a negative byte count from cozip subfile: " + handle.path);
+	}
 	if (h.seek_pos >= h.sub_size) {
 		return 0;
 	}

@@ -13,7 +13,9 @@ include_directories(src/include)
 
 set(EXTENSION_SOURCES
     src/cozip_extension.cpp
+    src/cozip_index.cpp
     src/cozip_subfile_fs.cpp
+    src/taco_sql.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
