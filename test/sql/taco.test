@@ -6,7 +6,7 @@ require cozip
 require parquet
 
 
-# taco_flat.zip: two fixed leaves, metadata at the collection and sample levels.
+# taco_flat.zip: two fixed leaves with sample and file metadata.
 # The default shape is one row per sample with one column per structure leaf.
 
 query T
@@ -26,7 +26,7 @@ FROM read_taco('test/data/taco_flat.zip') WHERE sample_id = 0;
 true	true
 
 query T
-SELECT list(split ORDER BY sample_id) FROM read_taco('test/data/taco_flat.zip');
+SELECT list("ml:split" ORDER BY sample_id) FROM read_taco('test/data/taco_flat.zip');
 ----
 [train, val, train, val]
 
@@ -50,7 +50,7 @@ WHERE "image.bin" IS NOT NULL;
 query T
 SELECT taco_levels('test/data/taco_nested.zip');
 ----
-[collection, sample, sample/after, sample/before]
+[sample, children, children/after, children/before]
 
 query T
 SELECT taco_structure('test/data/taco_nested.zip');
@@ -70,7 +70,7 @@ SELECT count(*) FROM read_taco('test/data/taco_nested.zip', pivoted := false);
 12
 
 query TTT
-SELECT path, kind, resolution
+SELECT path, "node:kind", "raster:resolution"
 FROM read_taco('test/data/taco_nested.zip', pivoted := false)
 WHERE sample_id = 0 ORDER BY path;
 ----
@@ -83,7 +83,7 @@ change.bin	label	NULL
 
 query I
 SELECT count(*) FROM read_taco('test/data/taco_nested.zip', pivoted := false)
-WHERE path = 'change.bin' AND resolution IS NULL;
+WHERE path = 'change.bin' AND "raster:resolution" IS NULL;
 ----
 3
 
@@ -109,12 +109,12 @@ SELECT list(sample_id) FROM read_taco('test/data/taco_nested.zip', idx := [1, 3]
 # level returns one contract level with its internal columns intact.
 
 query I
-SELECT count(*) FROM read_taco('test/data/taco_nested.zip', level := 'sample/before');
+SELECT count(*) FROM read_taco('test/data/taco_nested.zip', level := 'children/before');
 ----
 6
 
 query T
-SELECT "internal:relative_path" FROM read_taco('test/data/taco_nested.zip', level := 'sample/before')
+SELECT "internal:relative_path" FROM read_taco('test/data/taco_nested.zip', level := 'children/before')
 ORDER BY "internal:current_id" LIMIT 1;
 ----
 0/before/B02.bin
@@ -123,7 +123,7 @@ ORDER BY "internal:current_id" LIMIT 1;
 # taco_variable.zip: a variable leaf becomes one LIST column named by its prefix.
 
 query TT
-SELECT n_images, len("img") FROM read_taco('test/data/taco_variable.zip') ORDER BY sample_id;
+SELECT "ml:n_images", len("img") FROM read_taco('test/data/taco_variable.zip') ORDER BY sample_id;
 ----
 0	0
 1	1
@@ -209,8 +209,14 @@ WHERE "image.bin" LIKE '/vsisubfile/%,test/data/taco_cat/part_%.zip';
 query II
 SELECT kind, count(*) FROM taco_contract('test/data/taco_nested.zip') GROUP BY kind ORDER BY kind;
 ----
+derived	1
 level	4
 structure	4
+
+query T
+SELECT taco_derived('test/data/taco_nested.zip')[1] LIKE '%majortom%';
+----
+true
 
 query T
 SELECT taco_collection('test/data/taco_nested.zip') LIKE '%"taco:structure"%';
@@ -263,24 +269,38 @@ SELECT * FROM read_taco('test/data/taco_badjson');
 ----
 COLLECTION.json is not valid JSON
 
-# Both shapes need the contract: the flat one reads it to decide which level
-# owns a field that two levels declare. Only a raw level read gets through.
+# Every read checks the contract, including a raw level read.
 
 statement error
 SELECT * FROM read_taco('test/data/taco_badjson', pivoted := false);
 ----
 COLLECTION.json is not valid JSON
 
-query I
+statement error
 SELECT count(*) FROM read_taco('test/data/taco_badjson', level := 'sample');
 ----
-8
+COLLECTION.json is not valid JSON
+
+statement error
+SELECT * FROM read_taco('test/data/taco_badversion');
+----
+unsupported TACO version
+
+statement error
+SELECT taco_levels('test/data/taco_badversion');
+----
+unsupported TACO version
+
+statement error
+SELECT taco_collection('test/data/taco_badversion');
+----
+unsupported TACO version
 
 # A field declared at two levels is not a collision: the row carries the value
 # of the level it belongs to, and the shallower one is hidden.
 
 query TTI
-SELECT sample_id, path, resolution
+SELECT sample_id, path, "raster:resolution"
 FROM read_taco('test/data/taco_shadow.zip', pivoted := false)
 ORDER BY sample_id, path;
 ----
