@@ -97,6 +97,7 @@ static void TacoCollectionFunction(DataChunk &args, ExpressionState &state, Vect
 	auto &context = state.GetContext();
 	StringScalarLoop(args, result, "taco_collection", [&](const string &path) {
 		auto layout = ResolveTacoLayout(context, path);
+		ReadTacoContract(context, layout);
 		auto handle = OpenSource(context, layout.collection_uri, "taco_collection");
 		auto size = (idx_t)handle->GetFileSize();
 		string content(size, '\0');
@@ -152,8 +153,19 @@ static void TacoStructureFunction(DataChunk &args, ExpressionState &state, Vecto
 
 static void TacoLevelsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &context = state.GetContext();
-	StringListScalarLoop(args, result, "taco_levels",
-	                     [&](const string &path) { return ResolveTacoLayout(context, path).level_names; });
+	StringListScalarLoop(args, result, "taco_levels", [&](const string &path) {
+		auto layout = ResolveTacoLayout(context, path);
+		ReadTacoContract(context, layout);
+		return layout.level_names;
+	});
+}
+
+static void TacoDerivedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &context = state.GetContext();
+	StringListScalarLoop(args, result, "taco_derived", [&](const string &path) {
+		auto layout = ResolveTacoLayout(context, path);
+		return ReadTacoContract(context, layout).derived;
+	});
 }
 
 //! Reads one optional VARCHAR argument, returning "" when it is NULL.
@@ -251,6 +263,8 @@ static const char *CONTRACT_MACRO_BODY = R"sql(
 SELECT 'structure' AS kind, unnest(taco_structure(p)) AS value
 UNION ALL
 SELECT 'level' AS kind, unnest(taco_levels(p)) AS value
+UNION ALL
+SELECT 'derived' AS kind, unnest(taco_derived(p)) AS value
 )sql";
 
 //! Registers one table macro. ExtensionLoader installs into the system
@@ -291,6 +305,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                           TacoLevelsFunction);
 	taco_levels.stability = FunctionStability::CONSISTENT_WITHIN_QUERY;
 	loader.RegisterFunction(taco_levels);
+	ScalarFunction taco_derived("taco_derived", {LogicalType::VARCHAR}, LogicalType::LIST(LogicalType::VARCHAR),
+	                            TacoDerivedFunction);
+	taco_derived.stability = FunctionStability::CONSISTENT_WITHIN_QUERY;
+	loader.RegisterFunction(taco_derived);
 
 	ScalarFunction taco_sql("taco_sql",
 	                        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN,
