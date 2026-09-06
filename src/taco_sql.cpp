@@ -13,7 +13,9 @@ static const char *METADATA_PREFIX = "METADATA/";
 static const char *PARQUET_SUFFIX = ".parquet";
 static const char *COLLECTION_NAME = "COLLECTION.json";
 static const char *DATA_DIR = "DATA";
-static const char *LEVEL_COLLECTION = "collection";
+static const char *LEVEL_SAMPLE = "sample";
+static const char *LEVEL_CHILDREN = "children";
+static const char *TACO_VERSION = "3.0.0";
 
 // TACO spec 7.2. Users may not define columns with this prefix, so the
 // generator can strip them from the projected metadata without collisions.
@@ -49,16 +51,19 @@ static string FileToLevel(const string &file_name) {
 }
 
 static idx_t LevelDepth(const string &level) {
-	if (level == LEVEL_COLLECTION) {
+	if (level == LEVEL_SAMPLE) {
 		return 0;
 	}
 	return 1 + (idx_t)std::count(level.begin(), level.end(), '/');
 }
 
 static string ParentLevel(const string &level) {
+	if (level == LEVEL_CHILDREN) {
+		return LEVEL_SAMPLE;
+	}
 	auto slash = level.rfind('/');
 	if (slash == string::npos) {
-		return LEVEL_COLLECTION;
+		return LEVEL_SAMPLE;
 	}
 	return level.substr(0, slash);
 }
@@ -99,23 +104,20 @@ static void SortAndValidateLevels(vector<string> &names, vector<string> &uris, c
 	names = std::move(sorted_names);
 	uris = std::move(sorted_uris);
 
-	if (names[0] != LEVEL_COLLECTION) {
-		throw InvalidInputException("TACO dataset has no collection.parquet: %s", source);
+	if (names[0] != LEVEL_SAMPLE) {
+		throw InvalidInputException("TACO dataset has no sample.parquet: %s", source);
 	}
 	for (idx_t i = 1; i < names.size(); i++) {
-		if (names[i] == "sample") {
-			continue;
-		}
-		if (!StringUtil::StartsWith(names[i], "sample/")) {
-			throw InvalidInputException("METADATA level '%s' is not under 'sample': %s", names[i], source);
+		if (names[i] != LEVEL_CHILDREN && !StringUtil::StartsWith(names[i], "children/")) {
+			throw InvalidInputException("METADATA level '%s' is not 'children' or below it: %s", names[i], source);
 		}
 		auto parent = ParentLevel(names[i]);
 		if (std::find(names.begin(), names.begin() + i, parent) == names.begin() + i) {
 			throw InvalidInputException("METADATA level '%s' has no parent level '%s': %s", names[i], parent, source);
 		}
 	}
-	if (names.size() > 1 && names[1] != "sample") {
-		throw InvalidInputException("TACO dataset has levels below 'sample' but no sample.parquet: %s", source);
+	if (names.size() > 1 && names[1] != LEVEL_CHILDREN) {
+		throw InvalidInputException("TACO dataset has child levels but no children.parquet: %s", source);
 	}
 }
 
@@ -275,12 +277,22 @@ TacoContract ReadTacoContract(ClientContext &context, const TacoLayout &layout) 
 	}
 
 	TacoContract contract;
+	auto version = yyjson_obj_get(root, "taco:version");
+	if (!version || !yyjson_is_str(version)) {
+		throw InvalidInputException("%s has no valid taco:version: %s", COLLECTION_NAME, layout.source);
+	}
+	string version_text(yyjson_get_str(version), yyjson_get_len(version));
+	if (version_text != TACO_VERSION) {
+		throw InvalidInputException("unsupported TACO version '%s' in %s; expected %s", version_text, layout.source,
+		                            TACO_VERSION);
+	}
 	auto structure = yyjson_obj_get(root, "taco:structure");
 	if (!structure) {
 		throw InvalidInputException("%s has no taco:structure key: %s", COLLECTION_NAME, layout.source);
 	}
 	// TACO spec 5.2: null means every sample is a single file.
-	if (!yyjson_is_null(structure)) {
+	contract.null_structure = yyjson_is_null(structure);
+	if (!contract.null_structure) {
 		if (!yyjson_is_arr(structure)) {
 			throw InvalidInputException("%s: taco:structure must be an array or null: %s", COLLECTION_NAME,
 			                            layout.source);
@@ -299,20 +311,50 @@ TacoContract ReadTacoContract(ClientContext &context, const TacoLayout &layout) 
 	// taco:metadata names the user columns of every level. The reader needs
 	// them to resolve a field declared at two levels of the same branch.
 	auto metadata = yyjson_obj_get(root, "taco:metadata");
-	if (metadata && yyjson_is_obj(metadata)) {
-		size_t index, count;
-		yyjson_val *key, *value;
-		yyjson_obj_foreach(metadata, index, count, key, value) {
-			vector<string> names;
-			if (yyjson_is_obj(value)) {
-				size_t field_index, field_count;
-				yyjson_val *field_key, *field_value;
-				yyjson_obj_foreach(value, field_index, field_count, field_key, field_value) {
-					names.push_back(string(yyjson_get_str(field_key), yyjson_get_len(field_key)));
-				}
-			}
-			contract.fields.emplace_back(string(yyjson_get_str(key), yyjson_get_len(key)), std::move(names));
+	if (!metadata || !yyjson_is_obj(metadata)) {
+		throw InvalidInputException("%s has no valid taco:metadata object: %s", COLLECTION_NAME, layout.source);
+	}
+	size_t index, count;
+	yyjson_val *key, *value;
+	yyjson_obj_foreach(metadata, index, count, key, value) {
+		if (!yyjson_is_obj(value)) {
+			throw InvalidInputException("%s: metadata level must be an object: %s", COLLECTION_NAME, layout.source);
 		}
+		vector<string> names;
+		size_t field_index, field_count;
+		yyjson_val *field_key, *field_value;
+		yyjson_obj_foreach(value, field_index, field_count, field_key, field_value) {
+			names.push_back(string(yyjson_get_str(field_key), yyjson_get_len(field_key)));
+		}
+		contract.fields.emplace_back(string(yyjson_get_str(key), yyjson_get_len(key)), std::move(names));
+	}
+	for (auto &level : layout.level_names) {
+		if (!contract.FieldsOf(level)) {
+			throw InvalidInputException("%s has no metadata declaration for level '%s': %s", COLLECTION_NAME, level,
+			                            layout.source);
+		}
+	}
+	if (contract.fields.size() != layout.level_names.size()) {
+		throw InvalidInputException("%s metadata levels do not match its Parquet files: %s", COLLECTION_NAME,
+		                            layout.source);
+	}
+	if (contract.null_structure != layout.NullStructure()) {
+		throw InvalidInputException("%s structure does not match its metadata levels: %s", COLLECTION_NAME,
+		                            layout.source);
+	}
+
+	auto derived = yyjson_obj_get(root, "taco:derived");
+	if (derived) {
+		if (!yyjson_is_obj(derived)) {
+			throw InvalidInputException("%s: taco:derived must be an object: %s", COLLECTION_NAME, layout.source);
+		}
+		size_t length = 0;
+		auto serialized = yyjson_val_write(derived, YYJSON_WRITE_NOFLAG, &length);
+		if (!serialized) {
+			throw InvalidInputException("%s: could not read taco:derived: %s", COLLECTION_NAME, layout.source);
+		}
+		contract.derived.emplace_back(serialized, length);
+		free(serialized);
 	}
 	return contract;
 }
@@ -482,7 +524,7 @@ struct TacoQueryBuilder {
 		return out;
 	}
 
-	//! Chain of joins from `level` up to the collection level.
+	//! Chain of joins from `level` up to the sample level.
 	string JoinChain(idx_t level) const {
 		string out;
 		auto child = level;
@@ -715,16 +757,14 @@ struct TacoQueryBuilder {
 
 string BuildTacoSQL(ClientContext &context, const string &path, const TacoOptions &options) {
 	auto layout = ResolveTacoLayout(context, path);
+	auto contract = ReadTacoContract(context, layout);
 	if (!options.level.empty()) {
-		TacoContract empty;
-		return TacoQueryBuilder(layout, options, empty).LevelQuery();
+		return TacoQueryBuilder(layout, options, contract).LevelQuery();
 	}
-	if (layout.NullStructure()) {
-		TacoContract empty;
-		return TacoQueryBuilder(layout, options, empty).NullStructureQuery();
+	if (contract.null_structure) {
+		return TacoQueryBuilder(layout, options, contract).NullStructureQuery();
 	}
 
-	auto contract = ReadTacoContract(context, layout);
 	TacoQueryBuilder builder(layout, options, contract);
 	if (!options.pivot) {
 		return builder.FlatQuery();

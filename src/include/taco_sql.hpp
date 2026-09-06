@@ -57,8 +57,11 @@ string BuildTacoSQL(ClientContext &context, const string &path, const TacoOption
 struct TacoContract {
 	//! Empty when taco:structure is null.
 	vector<string> structure;
-	//! Level name to the user fields it declares. A level may be absent.
+	bool null_structure = false;
+	//! Level name to the user fields it declares.
 	vector<std::pair<string, vector<string>>> fields;
+	//! Serialized taco:derived object, empty when no derived groups are declared.
+	vector<string> derived;
 
 	const vector<string> *FieldsOf(const string &level) const;
 };
