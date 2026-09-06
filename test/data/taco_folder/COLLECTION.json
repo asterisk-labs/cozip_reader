@@ -1,7 +1,8 @@
 {
+  "taco:version": "3.0.0",
   "id": "taco-flat",
   "dataset_version": "1.0.0",
-  "description": "Flat TACO fixture",
+  "description": "taco-flat",
   "licenses": [
     "CC-BY-4.0"
   ],
@@ -16,51 +17,45 @@
   "tasks": [
     "segmentation"
   ],
-  "title": "Flat TACO fixture",
-  "extent": {
-    "spatial": [
-      -104.99,
-      -12.05,
-      139.69,
-      48.86
-    ],
-    "temporal": [
-      "2024-01-01T00:00:00Z",
-      "2024-01-04T00:00:00Z"
-    ]
-  },
   "taco:structure": [
     "image.bin",
     "label.bin"
   ],
   "taco:metadata": {
-    "collection": {
-      "stac:centroid": [
-        "binary",
-        "Center point in EPSG:4326 (WKB)"
-      ],
-      "stac:time_start": [
-        "timestamp[us]",
-        "Acquisition start (UTC)"
-      ],
-      "split": [
-        "string",
-        "Dataset split"
-      ],
-      "cloud_cover": [
-        "double",
-        "Cloud cover percentage"
-      ]
-    },
     "sample": {
-      "role": [
-        "string",
-        "Asset role"
-      ],
-      "bands": [
-        "int32",
-        "Band count"
-      ]
+      "stac:centroid": {
+        "type": "binary",
+        "nullable": false,
+        "description": ""
+      },
+      "stac:time_start": {
+        "type": "timestamp[us, UTC]",
+        "nullable": false,
+        "description": ""
+      },
+      "ml:split": {
+        "type": "string",
+        "nullable": false,
+        "description": ""
+      },
+      "ml:cloud_cover": {
+        "type": "double",
+        "nullable": false,
+        "description": ""
+      }
+    },
+    "children": {
+      "file:role": {
+        "type": "string",
+        "nullable": false,
+        "description": ""
+      },
+      "file:bands": {
+        "type": "int32",
+        "nullable": false,
+        "description": ""
+      }
     }
-  }
+  },
+  "title": "taco-flat"
 }

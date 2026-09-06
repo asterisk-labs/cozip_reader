@@ -1,285 +1,269 @@
-"""Generate TACO test fixtures for the DuckDB extension.
-
-Produces, under test/data/:
-
-  taco_flat.zip        2 fixed leaves, metadata at collection and sample level
-  taco_nested.zip      before/ and after/ folders, 4 contract levels
-  taco_variable.zip    a variable leaf img*[0,3].bin
-  taco_null.zip        taco:structure = null, one file per sample
-  taco_folder/         the same dataset as taco_flat in FOLDER mode
-  taco_cat/            two partitions plus the consolidated .tacocat directory
-  taco_badjson/        a FOLDER dataset whose COLLECTION.json is not JSON
-  taco_shadow.zip      the same field name declared at two contract levels
-
-Every archive is a cozip profile-2 container. Per cozip spec 14.5 the file
-extension is .zip; the profile byte in the byte-0 index is authoritative.
-
-Run from the repo root with the taco writer installed:
-
-    python test/generate_taco_fixtures.py
-"""
-
 from __future__ import annotations
 
+import json
 import shutil
 import struct
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated
+
+import pyarrow as pa
+from pydantic import BaseModel
 
 import taco
 
-THIS_DIR = Path(__file__).resolve().parent
-DATA_DIR = THIS_DIR / "data"
-
-CITIES = [
-    ("lima", -77.04, -12.05),
-    ("paris", 2.35, 48.86),
-    ("tokyo", 139.69, 35.69),
-    ("denver", -104.99, 39.74),
-]
-PAYLOAD = 2500  # bytes per inner file, keeps archives just over the 32 KiB floor
+DATA = Path(__file__).resolve().parent / "data"
+PAYLOAD = 2500
+CITIES = [(-77.04, -12.05), (2.35, 48.86), (139.69, 35.69), (-104.99, 39.74)]
 
 
-def wkb_point(x: float, y: float) -> bytes:
-    return struct.pack("<BIdd", 1, 1, float(x), float(y))
+class Geo(BaseModel):
+    centroid: bytes
+    time_start: Annotated[datetime, pa.timestamp("us", tz="UTC")]
 
 
-def provider() -> dict:
-    return {"name": "Asterisk Labs", "roles": ["producer"]}
+class ML(BaseModel):
+    split: str
+    cloud_cover: float
+
+
+class VariableML(BaseModel):
+    split: str
+    n_images: Annotated[int, pa.int32()]
+
+
+class File(BaseModel):
+    role: str
+    bands: Annotated[int, pa.int32()]
+
+
+class Kind(BaseModel):
+    kind: str
+
+
+class Raster(BaseModel):
+    resolution: Annotated[int, pa.int32()]
+
+
+def point(x: float, y: float) -> bytes:
+    return struct.pack("<BIdd", 1, 1, x, y)
 
 
 def payload(tag: str, index: int) -> bytes:
     return f"{tag}-{index}:".encode() * PAYLOAD
 
 
-def collection_of(contract: taco.Contract, identifier: str, description: str) -> taco.Collection:
+def sample_metadata(index: int) -> taco.Metadata:
+    lon, lat = CITIES[index % len(CITIES)]
+    return taco.Metadata(
+        stac=Geo(centroid=point(lon, lat), time_start=datetime(2024, 1, index + 1, tzinfo=timezone.utc)),
+        ml=ML(split="train" if index % 2 == 0 else "val", cloud_cover=12.5 * index),
+    )
+
+
+def collection(contract: taco.Contract, name: str) -> taco.Collection:
     return taco.Collection(
         contract=contract,
-        id=identifier,
+        id=name,
         dataset_version="1.0.0",
-        description=description,
+        description=name,
         licenses=["CC-BY-4.0"],
-        providers=[provider()],
+        providers=[{"name": "Asterisk Labs", "roles": ["producer"]}],
         tasks=["segmentation"],
-        title=description,
+        title=name,
     )
 
 
-def stac_collection_fields() -> dict:
-    return {
-        "stac:centroid": ["binary", "Center point in EPSG:4326 (WKB)"],
-        "stac:time_start": ["timestamp[us]", "Acquisition start (UTC)"],
-        "split": ["string", "Dataset split"],
-        "cloud_cover": ["double", "Cloud cover percentage"],
-    }
-
-
-def stac_values(index: int) -> dict:
-    _, lon, lat = CITIES[index % len(CITIES)]
-    return {
-        "stac:centroid": wkb_point(lon, lat),
-        "stac:time_start": datetime(2024, 1, 1 + index, tzinfo=timezone.utc),
-        "split": "train" if index % 2 == 0 else "val",
-        "cloud_cover": 12.5 * index,
-    }
-
-
-def build_flat(out: Path) -> None:
+def write_flat(output: Path, *, folder: bool = False) -> None:
     contract = taco.Contract(
         structure=["image.bin", "label.bin"],
-        metadata={
-            "collection": stac_collection_fields(),
-            "sample": {"role": ["string", "Asset role"], "bands": ["int32", "Band count"]},
-        },
+        metadata=taco.MetadataSchema(
+            taco.Level("sample", stac=Geo, ml=ML),
+            taco.Level("children", file=File),
+        ),
     )
-    collection = collection_of(contract, "taco-flat", "Flat TACO fixture")
-    with taco.open_writer(collection, out, overwrite=True) as writer:
+    target = output.with_suffix("") if folder else output
+    with taco.open_writer(collection(contract, "taco-flat"), target, overwrite=True) as writer:
         for index in range(4):
             writer.add(
                 taco.Sample(
-                    assets={"image.bin": payload("image", index), "label.bin": payload("label", index)},
-                    metadata={
-                        "collection": stac_values(index),
-                        "sample": {
-                            "image.bin": {"role": "image", "bands": 13},
-                            "label.bin": {"role": "label", "bands": 1},
-                        },
-                    },
+                    metadata=sample_metadata(index),
+                    assets=[
+                        taco.Asset(
+                            payload("image", index),
+                            path="image.bin",
+                            metadata=taco.Metadata(file=File(role="image", bands=13)),
+                        ),
+                        taco.Asset(
+                            payload("label", index),
+                            path="label.bin",
+                            metadata=taco.Metadata(file=File(role="label", bands=1)),
+                        ),
+                    ],
                 )
             )
         writer.run()
 
 
-def build_nested(out: Path) -> None:
+def write_nested(output: Path) -> None:
     contract = taco.Contract(
         structure=["before/B02.bin", "before/B03.bin", "after/B02.bin", "change.bin"],
-        metadata={
-            "collection": stac_collection_fields(),
-            "sample": {"kind": ["string", "Child role"]},
-            "sample/before": {"resolution": ["int32", "Metres per pixel"]},
-            "sample/after": {"resolution": ["int32", "Metres per pixel"]},
-        },
+        metadata=taco.MetadataSchema(
+            taco.Level("sample", stac=Geo, ml=ML, majortom=taco.metadata.sample.MajorTOM()),
+            taco.Level("children", node=Kind),
+            taco.Level("children/before", raster=Raster),
+            taco.Level("children/after", raster=Raster),
+        ),
     )
-    collection = collection_of(contract, "taco-nested", "Hierarchical TACO fixture")
-    with taco.open_writer(collection, out, overwrite=True) as writer:
+    with taco.open_writer(collection(contract, "taco-nested"), output, overwrite=True) as writer:
         for index in range(3):
             writer.add(
                 taco.Sample(
-                    assets={
-                        "before/B02.bin": payload("b02", index),
-                        "before/B03.bin": payload("b03", index),
-                        "after/B02.bin": payload("a02", index),
-                        "change.bin": payload("change", index),
-                    },
-                    metadata={
-                        "collection": stac_values(index),
-                        "sample": {
-                            "before": {"kind": "imagery"},
-                            "after": {"kind": "imagery"},
-                            "change.bin": {"kind": "label"},
-                        },
-                        "sample/before": {"B02.bin": {"resolution": 10}, "B03.bin": {"resolution": 10}},
-                        "sample/after": {"B02.bin": {"resolution": 20}},
-                    },
+                    metadata=sample_metadata(index),
+                    folders=[
+                        taco.Folder("before", metadata=taco.Metadata(node=Kind(kind="imagery"))),
+                        taco.Folder("after", metadata=taco.Metadata(node=Kind(kind="imagery"))),
+                    ],
+                    assets=[
+                        taco.Asset(
+                            payload("b02", index),
+                            path="before/B02.bin",
+                            metadata=taco.Metadata(raster=Raster(resolution=10)),
+                        ),
+                        taco.Asset(
+                            payload("b03", index),
+                            path="before/B03.bin",
+                            metadata=taco.Metadata(raster=Raster(resolution=10)),
+                        ),
+                        taco.Asset(
+                            payload("a02", index),
+                            path="after/B02.bin",
+                            metadata=taco.Metadata(raster=Raster(resolution=20)),
+                        ),
+                        taco.Asset(
+                            payload("change", index),
+                            path="change.bin",
+                            metadata=taco.Metadata(node=Kind(kind="label")),
+                        ),
+                    ],
                 )
             )
         writer.run()
 
 
-def build_variable(out: Path) -> None:
+def write_variable(output: Path) -> None:
     contract = taco.Contract(
         structure=["img*[0,3].bin", "mask.bin"],
-        metadata={
-            "collection": {"split": ["string", "Dataset split"], "n_images": ["int32", "Images in this sample"]},
-            "sample": {"kind": ["string", "Child role"]},
-        },
+        metadata=taco.MetadataSchema(
+            taco.Level("sample", ml=VariableML),
+            taco.Level("children", node=Kind),
+        ),
     )
-    collection = collection_of(contract, "taco-variable", "Variable-leaf TACO fixture")
-    with taco.open_writer(collection, out, overwrite=True) as writer:
+    with taco.open_writer(collection(contract, "taco-variable"), output, overwrite=True) as writer:
         for index in range(3):
-            count = index
-            assets = {f"img{k}.bin": payload(f"img{k}", index) for k in range(count)}
-            assets["mask.bin"] = payload("mask", index)
-            writer.add(
-                taco.Sample(
-                    assets=assets,
-                    metadata={
-                        "collection": {"split": "train", "n_images": count},
-                        "sample": {
-                            **{f"img{k}.bin": {"kind": "image"} for k in range(count)},
-                            "mask.bin": {"kind": "label"},
-                        },
-                    },
+            assets = [
+                taco.Asset(
+                    payload(f"img{number}", index),
+                    path=f"img{number}.bin",
+                    metadata=taco.Metadata(node=Kind(kind="image")),
                 )
+                for number in range(index)
+            ]
+            assets.append(
+                taco.Asset(payload("mask", index), path="mask.bin", metadata=taco.Metadata(node=Kind(kind="label")))
             )
+            writer.add(taco.Sample(metadata=taco.Metadata(ml=VariableML(split="train", n_images=index)), assets=assets))
         writer.run()
 
 
-def build_shadow(out: Path) -> None:
-    """The same field name at two levels. The deeper one owns its own rows."""
+def write_shadow(output: Path) -> None:
     contract = taco.Contract(
         structure=["before/B02.bin", "change.bin"],
-        metadata={
-            "collection": {"split": ["string", "Dataset split"]},
-            "sample": {"resolution": ["int32", "Metres per pixel"]},
-            "sample/before": {"resolution": ["int32", "Metres per pixel"]},
-        },
+        metadata=taco.MetadataSchema(
+            taco.Level("sample", ml=VariableML),
+            taco.Level("children", raster=Raster),
+            taco.Level("children/before", raster=Raster),
+        ),
     )
-    collection = collection_of(contract, "taco-shadow", "Shadowed-field TACO fixture")
-    with taco.open_writer(collection, out, overwrite=True) as writer:
+    with taco.open_writer(collection(contract, "taco-shadow"), output, overwrite=True) as writer:
         for index in range(2):
             writer.add(
                 taco.Sample(
-                    assets={"before/B02.bin": payload("b02", index), "change.bin": payload("change", index)},
-                    metadata={
-                        "collection": {"split": "train"},
-                        "sample": {"before": {"resolution": 1}, "change.bin": {"resolution": 2}},
-                        "sample/before": {"B02.bin": {"resolution": 3}},
-                    },
+                    metadata=taco.Metadata(ml=VariableML(split="train", n_images=1)),
+                    folders=[taco.Folder("before", metadata=taco.Metadata(raster=Raster(resolution=1)))],
+                    assets=[
+                        taco.Asset(
+                            payload("b02", index),
+                            path="before/B02.bin",
+                            metadata=taco.Metadata(raster=Raster(resolution=3)),
+                        ),
+                        taco.Asset(
+                            payload("change", index),
+                            path="change.bin",
+                            metadata=taco.Metadata(raster=Raster(resolution=2)),
+                        ),
+                    ],
                 )
             )
         writer.run()
 
 
-def build_null(out: Path) -> None:
+def write_null(output: Path) -> None:
     contract = taco.Contract(
         structure=None,
-        metadata={"collection": {"label": ["int32", "Class id"], "split": ["string", "Dataset split"]}},
+        metadata=taco.MetadataSchema(taco.Level("sample", ml=VariableML)),
     )
-    collection = collection_of(contract, "taco-null", "Single-file TACO fixture")
-    with taco.open_writer(collection, out, overwrite=True) as writer:
+    with taco.open_writer(collection(contract, "taco-null"), output, overwrite=True) as writer:
         for index in range(6):
             writer.add(
                 taco.Sample(
                     assets=payload("sample", index),
-                    metadata={"collection": {"label": index % 3, "split": "train"}},
+                    metadata=taco.Metadata(ml=VariableML(split="train", n_images=index % 3)),
                 )
             )
         writer.run()
 
 
-def build_folder(archive: Path, out: Path) -> None:
-    if out.exists():
-        shutil.rmtree(out)
-    taco.unpack(archive, out)
-
-
-def build_bad_json(source: Path, out: Path) -> None:
-    """A dataset the reader must reject with a clear message, not a crash."""
-    if out.exists():
-        shutil.rmtree(out)
-    shutil.copytree(source, out)
-    (out / "COLLECTION.json").write_text("{ this is not json\n", encoding="utf-8")
-
-
-def build_tacocat(out: Path) -> None:
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
+def write_tacocat(output: Path) -> None:
+    if output.exists():
+        shutil.rmtree(output)
+    output.mkdir(parents=True)
     contract = taco.Contract(
         structure=["image.bin"],
-        metadata={
-            "collection": stac_collection_fields(),
-            "sample": {"role": ["string", "Asset role"]},
-        },
+        metadata=taco.MetadataSchema(taco.Level("sample", stac=Geo, ml=ML)),
     )
-    collection = collection_of(contract, "taco-cat", "Partitioned TACO fixture")
-    with taco.open_writer(collection, out / "part.zip", partition_by="split", overwrite=True) as writer:
+    with taco.open_writer(
+        collection(contract, "taco-cat"), output / "part.zip", partition_by="ml:split", overwrite=True
+    ) as writer:
         for index in range(6):
             writer.add(
                 taco.Sample(
-                    assets={"image.bin": payload("image", index)},
-                    metadata={"collection": stac_values(index), "sample": {"image.bin": {"role": "image"}}},
+                    metadata=sample_metadata(index),
+                    assets=[taco.Asset(payload("image", index), path="image.bin")],
                 )
             )
         writer.run()
 
 
 def main() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory():
-        built = []
-        for name, builder in (
-            ("taco_flat.zip", build_flat),
-            ("taco_nested.zip", build_nested),
-            ("taco_variable.zip", build_variable),
-            ("taco_null.zip", build_null),
-            ("taco_shadow.zip", build_shadow),
-        ):
-            target = DATA_DIR / name
-            builder(target)
-            built.append(target)
-
-        build_folder(DATA_DIR / "taco_flat.zip", DATA_DIR / "taco_folder")
-        build_bad_json(DATA_DIR / "taco_folder", DATA_DIR / "taco_badjson")
-        build_tacocat(DATA_DIR / "taco_cat")
-
-    for target in built:
-        print(f"wrote {target.relative_to(THIS_DIR.parent)} ({target.stat().st_size} bytes)")
-    for directory in (DATA_DIR / "taco_folder", DATA_DIR / "taco_badjson", DATA_DIR / "taco_cat"):
-        count = sum(1 for _ in directory.rglob("*") if _.is_file())
-        print(f"wrote {directory.relative_to(THIS_DIR.parent)}/ ({count} files)")
+    DATA.mkdir(parents=True, exist_ok=True)
+    for path in (DATA / "taco_folder", DATA / "taco_badjson", DATA / "taco_badversion", DATA / "taco_cat"):
+        if path.exists():
+            shutil.rmtree(path)
+    write_flat(DATA / "taco_flat.zip")
+    write_flat(DATA / "taco_folder.zip", folder=True)
+    shutil.copytree(DATA / "taco_folder", DATA / "taco_badjson")
+    (DATA / "taco_badjson/COLLECTION.json").write_text("{ not json")
+    shutil.copytree(DATA / "taco_folder", DATA / "taco_badversion")
+    collection_path = DATA / "taco_badversion/COLLECTION.json"
+    data = json.loads(collection_path.read_text())
+    data["taco:version"] = "2.0.0"
+    collection_path.write_text(json.dumps(data))
+    write_nested(DATA / "taco_nested.zip")
+    write_variable(DATA / "taco_variable.zip")
+    write_null(DATA / "taco_null.zip")
+    write_shadow(DATA / "taco_shadow.zip")
+    write_tacocat(DATA / "taco_cat")
 
 
 if __name__ == "__main__":
