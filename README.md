@@ -61,14 +61,15 @@ USING SAMPLE 32 ROWS;
 
 ```sql
 SELECT * FROM read_taco('cloudsen12.zip');
--- sample_id │ split │ cloud_cover │ s2_l1c.tif      │ s2_l2a.tif      │ target.tif
--- 0         │ train │ 23.5        │ /vsisubfile/... │ /vsisubfile/... │ /vsisubfile/...
+-- sample_id │ ml:split │ quality:cloud_cover │ s2_l1c.tif      │ target.tif
+-- 0         │ train    │ 23.5                │ /vsisubfile/... │ /vsisubfile/...
 ```
 
 That shape feeds a dataloader directly. Every file column holds a GDAL path that opens the file in place.
 
-The pivoted shape includes collection-level metadata. Use `pivoted := false`
-to include metadata from deeper levels, with one row per file.
+The pivoted shape includes sample metadata. Use `pivoted := false` to include
+asset and folder metadata too, with one row per file. Collection metadata stays
+in `COLLECTION.json` and is available through `taco_collection()`.
 
 ```python
 import duckdb, rasterio
@@ -78,7 +79,7 @@ con.execute("INSTALL cozip FROM community; LOAD cozip")
 rows = con.execute("""
     SELECT "s2_l1c.tif", "target.tif"
     FROM read_taco('hf://datasets/tacofoundation/cloudsen12/cloudsen12.zip')
-    WHERE split = 'train' USING SAMPLE 64 ROWS
+    WHERE "ml:split" = 'train' USING SAMPLE 64 ROWS
 """).fetchall()
 
 with rasterio.open(rows[0][0]) as src:
@@ -97,7 +98,7 @@ with rasterio.open(rows[0][0]) as src:
 
 ```sql
 -- One row per file, with the metadata of every level it belongs to.
-SELECT sample_id, path, resolution, "cozip:gdal_vsi"
+SELECT sample_id, path, "raster:resolution", "cozip:gdal_vsi"
 FROM read_taco('change_detection.zip', pivoted := false);
 -- 0 │ after/B02.tif  │ 20 │ /vsisubfile/...
 -- 0 │ before/B02.tif │ 10 │ /vsisubfile/...
@@ -107,7 +108,7 @@ FROM read_taco('change_detection.zip', pivoted := false);
 SELECT * FROM read_taco('ds.zip', idx := [0, 100], files := ['before/B02.tif', 'after/B02.tif']);
 
 -- One level raw, for inspection.
-SELECT * FROM read_taco('ds.zip', level := 'sample/before');
+SELECT * FROM read_taco('ds.zip', level := 'children/before');
 ```
 
 Rows have no implicit order. Add `ORDER BY sample_id` when order matters.
@@ -134,9 +135,10 @@ A TACOCAT directory contains the consolidated metadata for several ZIP partition
 #### Contract inspection
 
 ```sql
-SELECT * FROM taco_contract('ds.zip');   -- kind ('structure' | 'level'), value
+SELECT * FROM taco_contract('ds.zip');   -- structure, level and derived rows
 SELECT taco_structure('ds.zip');         -- LIST of the contract's leaves
 SELECT taco_levels('ds.zip');            -- LIST of the metadata levels
+SELECT taco_derived('ds.zip');           -- LIST containing taco:derived as JSON
 SELECT taco_collection('ds.zip');        -- the raw COLLECTION.json
 ```
 
@@ -162,6 +164,7 @@ SELECT taco_sql('ds.zip', NULL, NULL, true, NULL, true);
 | `taco_contract(path)` | table of `kind`, `value` |
 | `taco_structure(path)` | `LIST(VARCHAR)` |
 | `taco_levels(path)` | `LIST(VARCHAR)` |
+| `taco_derived(path)` | `LIST(VARCHAR)`, serialized `taco:derived` object |
 | `taco_collection(path)` | `VARCHAR`, raw JSON |
 | `taco_sql(path, idx, level, pivoted, files, gdal_vsi)` | `VARCHAR`, generated SQL |
 | `cozip_profile(path)` | `VARCHAR` |
