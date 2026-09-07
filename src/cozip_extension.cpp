@@ -289,27 +289,35 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto &db = loader.GetDatabaseInstance();
 	db.GetFileSystem().RegisterSubSystem(make_uniq<CozipSubFileSystem>());
 
-	loader.RegisterFunction(
-	    ScalarFunction("cozip_offset_size", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipOffsetSizeFunction));
-	loader.RegisterFunction(
-	    ScalarFunction("cozip_profile", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipProfileFunction));
-	loader.RegisterFunction(
-	    ScalarFunction("cozip_vsi_base", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipVsiBaseFunction));
+	ScalarFunction cozip_offset_size("cozip_offset_size", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                                 CozipOffsetSizeFunction);
+	cozip_offset_size.SetFallible();
+	loader.RegisterFunction(cozip_offset_size);
+	ScalarFunction cozip_profile("cozip_profile", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipProfileFunction);
+	cozip_profile.SetFallible();
+	loader.RegisterFunction(cozip_profile);
+	ScalarFunction cozip_vsi_base("cozip_vsi_base", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipVsiBaseFunction);
+	cozip_vsi_base.SetFallible();
+	loader.RegisterFunction(cozip_vsi_base);
 	ScalarFunction taco_collection("taco_collection", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                               TacoCollectionFunction);
 	taco_collection.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
+	taco_collection.SetFallible();
 	loader.RegisterFunction(taco_collection);
 	ScalarFunction taco_structure("taco_structure", {LogicalType::VARCHAR}, LogicalType::LIST(LogicalType::VARCHAR),
 	                              TacoStructureFunction);
 	taco_structure.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
+	taco_structure.SetFallible();
 	loader.RegisterFunction(taco_structure);
 	ScalarFunction taco_levels("taco_levels", {LogicalType::VARCHAR}, LogicalType::LIST(LogicalType::VARCHAR),
 	                           TacoLevelsFunction);
 	taco_levels.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
+	taco_levels.SetFallible();
 	loader.RegisterFunction(taco_levels);
 	ScalarFunction taco_derived("taco_derived", {LogicalType::VARCHAR}, LogicalType::LIST(LogicalType::VARCHAR),
 	                            TacoDerivedFunction);
 	taco_derived.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
+	taco_derived.SetFallible();
 	loader.RegisterFunction(taco_derived);
 
 	ScalarFunction taco_sql("taco_sql",
@@ -318,6 +326,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                        LogicalType::VARCHAR, TacoSqlFunction);
 	taco_sql.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	taco_sql.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
+	taco_sql.SetFallible();
 	loader.RegisterFunction(taco_sql);
 
 	RegisterTableMacro(loader, "read_flat(p, gdal_vsi := true)", FLAT_MACRO_BODY);
