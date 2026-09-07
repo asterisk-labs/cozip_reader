@@ -20,6 +20,10 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/vector.hpp"
+#if __has_include("duckdb/common/vector/list_vector.hpp")
+#include "duckdb/common/vector/list_vector.hpp"
+#define COZIP_DUCKDB_SPLIT_VECTOR_HEADERS 1
+#endif
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/parser/parsed_data/create_macro_info.hpp"
@@ -51,14 +55,13 @@ static void StringScalarLoop(DataChunk &args, Vector &result, const char *functi
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 
 	auto source = FlatVector::GetData<string_t>(args.data[0]);
-	auto target = FlatVector::GetData<string_t>(result);
 	auto &validity = FlatVector::Validity(args.data[0]);
 
 	for (idx_t i = 0; i < (constant ? 1 : count); i++) {
 		if (!validity.RowIsValid(i)) {
 			throw InvalidInputException("%s: path argument is NULL", function_name);
 		}
-		target[i] = StringVector::AddString(result, body(source[i].GetString()));
+		result.SetValue(i, Value(body(source[i].GetString())));
 	}
 	if (constant) {
 		result.SetVectorType(VectorType::CONSTANT_VECTOR);
@@ -110,16 +113,12 @@ static void TacoCollectionFunction(DataChunk &args, ExpressionState &state, Vect
 
 //! Fills one LIST(VARCHAR) result row from a vector of strings.
 static void SetStringList(Vector &result, idx_t row, const vector<string> &values) {
-	auto entries = FlatVector::GetData<list_entry_t>(result);
-	entries[row].offset = ListVector::GetListSize(result);
-	entries[row].length = values.size();
-	ListVector::Reserve(result, entries[row].offset + values.size());
-	auto &child = ListVector::GetEntry(result);
-	auto child_data = FlatVector::GetData<string_t>(child);
-	for (idx_t i = 0; i < values.size(); i++) {
-		child_data[entries[row].offset + i] = StringVector::AddString(child, values[i]);
+	vector<Value> children;
+	children.reserve(values.size());
+	for (auto &value : values) {
+		children.emplace_back(value);
 	}
-	ListVector::SetListSize(result, entries[row].offset + values.size());
+	result.SetValue(row, Value::LIST(LogicalType::VARCHAR, std::move(children)));
 }
 
 template <typename Body>
@@ -225,7 +224,6 @@ static void TacoSqlFunction(DataChunk &args, ExpressionState &state, Vector &res
 	args.data[0].Flatten(count);
 	auto paths = FlatVector::GetData<string_t>(args.data[0]);
 	auto &path_validity = FlatVector::Validity(args.data[0]);
-	auto target = FlatVector::GetData<string_t>(result);
 
 	for (idx_t row = 0; row < (constant ? 1 : count); row++) {
 		if (!path_validity.RowIsValid(row)) {
@@ -237,7 +235,7 @@ static void TacoSqlFunction(DataChunk &args, ExpressionState &state, Vector &res
 		options.pivot = OptionalBool(args, 3, row, true);
 		options.has_files = OptionalStringList(args, 4, row, options.files);
 		options.gdal_vsi = OptionalBool(args, 5, row, true);
-		target[row] = StringVector::AddString(result, BuildTacoSQL(context, paths[row].GetString(), options));
+		result.SetValue(row, Value(BuildTacoSQL(context, paths[row].GetString(), options)));
 	}
 	if (constant) {
 		result.SetVectorType(VectorType::CONSTANT_VECTOR);
@@ -278,7 +276,11 @@ static void RegisterTableMacro(ExtensionLoader &loader, const string &signature,
 	}
 	auto &create_statement = static_cast<CreateStatement &>(*parser.statements[0]);
 	auto &macro_info = static_cast<CreateMacroInfo &>(*create_statement.info);
+#ifdef COZIP_DUCKDB_SPLIT_VECTOR_HEADERS
+	macro_info.SetSchema("main");
+#else
 	macro_info.schema = "main";
+#endif
 	macro_info.internal = true;
 	loader.RegisterFunction(macro_info);
 }
@@ -295,27 +297,27 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    ScalarFunction("cozip_vsi_base", {LogicalType::VARCHAR}, LogicalType::VARCHAR, CozipVsiBaseFunction));
 	ScalarFunction taco_collection("taco_collection", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                               TacoCollectionFunction);
-	taco_collection.stability = FunctionStability::CONSISTENT_WITHIN_QUERY;
+	taco_collection.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	loader.RegisterFunction(taco_collection);
 	ScalarFunction taco_structure("taco_structure", {LogicalType::VARCHAR}, LogicalType::LIST(LogicalType::VARCHAR),
 	                              TacoStructureFunction);
-	taco_structure.stability = FunctionStability::CONSISTENT_WITHIN_QUERY;
+	taco_structure.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	loader.RegisterFunction(taco_structure);
 	ScalarFunction taco_levels("taco_levels", {LogicalType::VARCHAR}, LogicalType::LIST(LogicalType::VARCHAR),
 	                           TacoLevelsFunction);
-	taco_levels.stability = FunctionStability::CONSISTENT_WITHIN_QUERY;
+	taco_levels.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	loader.RegisterFunction(taco_levels);
 	ScalarFunction taco_derived("taco_derived", {LogicalType::VARCHAR}, LogicalType::LIST(LogicalType::VARCHAR),
 	                            TacoDerivedFunction);
-	taco_derived.stability = FunctionStability::CONSISTENT_WITHIN_QUERY;
+	taco_derived.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	loader.RegisterFunction(taco_derived);
 
 	ScalarFunction taco_sql("taco_sql",
 	                        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN,
 	                         LogicalType::LIST(LogicalType::VARCHAR), LogicalType::BOOLEAN},
 	                        LogicalType::VARCHAR, TacoSqlFunction);
-	taco_sql.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	taco_sql.stability = FunctionStability::CONSISTENT_WITHIN_QUERY;
+	taco_sql.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	taco_sql.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	loader.RegisterFunction(taco_sql);
 
 	RegisterTableMacro(loader, "read_flat(p, gdal_vsi := true)", FLAT_MACRO_BODY);
