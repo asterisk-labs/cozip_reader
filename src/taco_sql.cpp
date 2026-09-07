@@ -665,24 +665,41 @@ struct TacoQueryBuilder {
 	}
 
 	string FlatQuery() const {
-		return CommonTableExpressions() + "\n" + FlatBranches(false);
+		if (!options.has_files) {
+			return CommonTableExpressions() + "\n" + FlatBranches(false);
+		}
+		auto leaves = SelectedLeaves();
+		return CommonTableExpressions() + "\n" + FlatBranches(false, &leaves);
 	}
 
-	string PivotQuery(const vector<string> &structure) const {
+	vector<TacoLeaf> SelectedLeaves() const {
+		auto &structure = contract.structure;
+		string unknown;
+		for (auto &name : options.files) {
+			if (std::find(structure.begin(), structure.end(), name) == structure.end()) {
+				unknown += (unknown.empty() ? "" : ", ") + name;
+			}
+		}
+		if (!unknown.empty()) {
+			throw InvalidInputException("read_taco: files contains unknown structure leaf: %s", unknown);
+		}
+
 		vector<TacoLeaf> leaves;
 		for (auto &declaration : structure) {
-			auto leaf = ParseLeaf(declaration);
-			if (options.has_files) {
-				auto wanted = std::find(options.files.begin(), options.files.end(), declaration) != options.files.end();
-				if (!wanted) {
-					continue;
-				}
+			if (options.has_files &&
+			    std::find(options.files.begin(), options.files.end(), declaration) == options.files.end()) {
+				continue;
 			}
-			leaves.push_back(leaf);
+			leaves.push_back(ParseLeaf(declaration));
 		}
 		if (leaves.empty()) {
 			throw InvalidInputException("read_taco: no structure leaf matches the requested files");
 		}
+		return leaves;
+	}
+
+	string PivotQuery() const {
+		auto leaves = SelectedLeaves();
 		if (!options.gdal_vsi) {
 			string out = "SELECT " + Alias(0) + "." + Quote(ID_CURRENT) + " AS sample_id";
 			if (tacocat) {
@@ -759,9 +776,15 @@ string BuildTacoSQL(ClientContext &context, const string &path, const TacoOption
 	auto layout = ResolveTacoLayout(context, path);
 	auto contract = ReadTacoContract(context, layout);
 	if (!options.level.empty()) {
+		if (options.has_files) {
+			throw InvalidInputException("read_taco: files does not apply when level is set");
+		}
 		return TacoQueryBuilder(layout, options, contract).LevelQuery();
 	}
 	if (contract.null_structure) {
+		if (options.has_files) {
+			throw InvalidInputException("read_taco: files requires taco:structure");
+		}
 		return TacoQueryBuilder(layout, options, contract).NullStructureQuery();
 	}
 
@@ -773,7 +796,7 @@ string BuildTacoSQL(ClientContext &context, const string &path, const TacoOption
 		throw InvalidInputException("taco:structure is null but the dataset has %llu metadata levels: %s",
 		                            (uint64_t)layout.level_names.size(), layout.source);
 	}
-	return builder.PivotQuery(contract.structure);
+	return builder.PivotQuery();
 }
 
 } // namespace duckdb

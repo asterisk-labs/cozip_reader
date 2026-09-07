@@ -87,10 +87,15 @@ WHERE path = 'change.bin' AND "raster:resolution" IS NULL;
 ----
 3
 
-# files restricts which leaves become columns.
+# files applies to both layouts.
 
 query I
 SELECT count(*) FROM (SELECT * FROM read_taco('test/data/taco_nested.zip', files := ['change.bin']));
+----
+3
+
+query I
+SELECT count(*) FROM read_taco('test/data/taco_nested.zip', pivoted := false, files := ['change.bin']);
 ----
 3
 
@@ -259,7 +264,27 @@ idx must contain non-negative integers
 statement error
 SELECT * FROM read_taco('test/data/taco_nested.zip', files := ['nope.bin']);
 ----
-no structure leaf matches
+unknown structure leaf: nope.bin
+
+statement error
+SELECT * FROM read_taco('test/data/taco_nested.zip', files := ['change.bin', 'nope.bin']);
+----
+unknown structure leaf: nope.bin
+
+statement error
+SELECT * FROM read_taco('test/data/taco_nested.zip', pivoted := false, files := ['nope.bin']);
+----
+unknown structure leaf: nope.bin
+
+statement error
+SELECT * FROM read_taco('test/data/taco_nested.zip', level := 'children', files := ['change.bin']);
+----
+files does not apply when level is set
+
+statement error
+SELECT * FROM read_taco('test/data/taco_null.zip', files := ['change.bin']);
+----
+files requires taco:structure
 
 # A dataset whose COLLECTION.json is unreadable fails with a message that
 # names the file, rather than crashing inside the generator.
