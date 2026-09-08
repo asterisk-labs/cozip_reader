@@ -1,7 +1,7 @@
 extension:
   name: cozip
   description: Cloud-Optimized ZIP reader for DuckDB
-  version: 2.0.0
+  version: 2.0.1
   language: C++
   build: cmake
   license: MIT

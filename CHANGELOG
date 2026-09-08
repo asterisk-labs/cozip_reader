@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.0.1
+
+### Fixed
+
+- `files` now filters both TACO layouts and rejects unknown leaves.
+
 ## v2.0.0
 
 ### Added
