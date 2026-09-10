@@ -39,7 +39,7 @@ WHERE "image.bin" LIKE '/vsisubfile/%,test/data/taco_flat.zip';
 4
 
 query I
-SELECT count(*) FROM read_taco('test/data/taco_flat.zip', gdal_vsi := false)
+SELECT count(*) FROM read_taco('test/data/taco_flat.zip', location := false)
 WHERE "image.bin" IS NOT NULL;
 ----
 0
@@ -136,14 +136,14 @@ SELECT "ml:n_images", len("img") FROM read_taco('test/data/taco_variable.zip') O
 
 query T
 SELECT bool_and("img" IS NULL)
-FROM read_taco('test/data/taco_variable.zip', gdal_vsi := false);
+FROM read_taco('test/data/taco_variable.zip', location := false);
 ----
 true
 
 # The list follows the cardinal index, not lexicographic order.
 
 query I
-SELECT "img"[1] = (SELECT "cozip:gdal_vsi" FROM read_taco('test/data/taco_variable.zip', pivoted := false)
+SELECT "img"[1] = (SELECT "taco:location" FROM read_taco('test/data/taco_variable.zip', pivoted := false)
                    WHERE sample_id = 2 AND path = 'img0.bin')
 FROM read_taco('test/data/taco_variable.zip') WHERE sample_id = 2;
 ----
@@ -164,7 +164,7 @@ SELECT count(*) FROM read_taco('test/data/taco_null.zip');
 
 query I
 SELECT count(*) FROM read_taco('test/data/taco_null.zip')
-WHERE "cozip:gdal_vsi" LIKE '/vsisubfile/%';
+WHERE "taco:location" LIKE '/vsisubfile/%';
 ----
 6
 
@@ -333,3 +333,9 @@ ORDER BY sample_id, path;
 0	change.bin	2
 1	before/B02.bin	3
 1	change.bin	2
+
+# TACO spec 14.5: the TACO profile never emits the Flat profile's column.
+
+statement error
+SELECT "cozip:location" FROM read_taco('test/data/taco_flat.zip', pivoted := false);
+----

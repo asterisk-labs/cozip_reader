@@ -234,7 +234,7 @@ static void TacoSqlFunction(DataChunk &args, ExpressionState &state, Vector &res
 		options.level = OptionalString(args, 2, row);
 		options.pivot = OptionalBool(args, 3, row, true);
 		options.has_files = OptionalStringList(args, 4, row, options.files);
-		options.gdal_vsi = OptionalBool(args, 5, row, true);
+		options.location = OptionalBool(args, 5, row, true);
 		result.SetValue(row, Value(BuildTacoSQL(context, paths[row].GetString(), options)));
 	}
 	if (constant) {
@@ -242,19 +242,18 @@ static void TacoSqlFunction(DataChunk &args, ExpressionState &state, Vector &res
 	}
 }
 
-// read_flat keeps the shape read_cozip has always had: one row per archive
-// entry, plus the GDAL path. read_cozip stays as a deprecated alias.
+// One row per archive entry, plus where its payload can be read from.
 static const char *FLAT_MACRO_BODY = R"sql(
 SELECT *,
-  CASE WHEN gdal_vsi
+  CASE WHEN location
        THEN '/vsisubfile/' || "offset" || '_' || "size" || ',' || cozip_vsi_base(p)
        ELSE NULL
-  END AS "cozip:gdal_vsi"
+  END AS "cozip:location"
 FROM read_parquet('cozip-subfile://' || cozip_offset_size(p) || '!' || p)
 )sql";
 
 static const char *TACO_MACRO_BODY = R"sql(
-SELECT * FROM query(taco_sql(p, CAST(idx AS VARCHAR), level, pivoted, files, gdal_vsi))
+SELECT * FROM query(taco_sql(p, CAST(idx AS VARCHAR), level, pivoted, files, location))
 )sql";
 
 static const char *CONTRACT_MACRO_BODY = R"sql(
@@ -329,12 +328,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	taco_sql.SetFallible();
 	loader.RegisterFunction(taco_sql);
 
-	RegisterTableMacro(loader, "read_flat(p, gdal_vsi := true)", FLAT_MACRO_BODY);
-	RegisterTableMacro(loader, "read_cozip(p, gdal_vsi := true)", FLAT_MACRO_BODY);
+	RegisterTableMacro(loader, "read_flat(p, location := true)", FLAT_MACRO_BODY);
+	RegisterTableMacro(loader, "read_cozip(p, location := true)", FLAT_MACRO_BODY);
 	// TACO spec 8.2 calls this parameter "pivot"; DuckDB reserves that word
 	// for the PIVOT statement, so the reader spells it "pivoted".
 	RegisterTableMacro(loader,
-	                   "read_taco(p, idx := NULL, level := NULL, pivoted := true, files := NULL, gdal_vsi := true)",
+	                   "read_taco(p, idx := NULL, level := NULL, pivoted := true, files := NULL, location := true)",
 	                   TACO_MACRO_BODY);
 	RegisterTableMacro(loader, "taco_contract(p)", CONTRACT_MACRO_BODY);
 }

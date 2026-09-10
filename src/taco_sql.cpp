@@ -435,9 +435,9 @@ struct TacoQueryBuilder {
 		return out + ")";
 	}
 
-	//! GDAL path for one data row, or NULL when the caller opted out.
+	//! Where one data row can be read from, or NULL when the caller opted out.
 	string VsiExpression(idx_t level) const {
-		if (!options.gdal_vsi) {
+		if (!options.location) {
 			return "NULL::VARCHAR";
 		}
 		auto alias = Alias(level);
@@ -624,7 +624,7 @@ struct TacoQueryBuilder {
 				out += ", " + Alias(0) + "." + Quote(ID_SOURCE) + " AS source_file";
 			}
 			out += ", " + PathExpression(level) + " AS path";
-			out += ", " + VsiExpression(level) + " AS " + Quote("cozip:gdal_vsi");
+			out += ", " + VsiExpression(level) + " AS " + Quote(TACO_LOCATION_COLUMN);
 			if (!identity_only) {
 				out += AncestorProjection(level);
 			}
@@ -654,7 +654,7 @@ struct TacoQueryBuilder {
 		if (tacocat) {
 			out += ", " + Quote(ID_SOURCE) + " AS source_file";
 		}
-		out += ", " + VsiExpression(0) + " AS " + Quote("cozip:gdal_vsi");
+		out += ", " + VsiExpression(0) + " AS " + Quote(TACO_LOCATION_COLUMN);
 		out += ", *" + ExcludeList(0);
 		out += " FROM read_parquet(" + Literal(layout.level_uris[0]) + ") AS " + Alias(0);
 		auto idx = IdxFilter(Alias(0));
@@ -700,7 +700,7 @@ struct TacoQueryBuilder {
 
 	string PivotQuery() const {
 		auto leaves = SelectedLeaves();
-		if (!options.gdal_vsi) {
+		if (!options.location) {
 			string out = "SELECT " + Alias(0) + "." + Quote(ID_CURRENT) + " AS sample_id";
 			if (tacocat) {
 				out += ", " + Alias(0) + "." + Quote(ID_SOURCE) + " AS source_file";
@@ -730,11 +730,11 @@ struct TacoQueryBuilder {
 				// TACO spec 5.2: the cardinal index has no leading zeros, so
 				// img01.tif is not an instance of img*[a,b].tif.
 				auto pattern = VariablePattern(leaf);
-				out += ", list(" + Quote("cozip:gdal_vsi") + " ORDER BY TRY_CAST(regexp_extract(path, " +
+				out += ", list(" + Quote(TACO_LOCATION_COLUMN) + " ORDER BY TRY_CAST(regexp_extract(path, " +
 				       Literal(pattern) + ", 1) AS BIGINT)) FILTER (WHERE regexp_matches(path, " + Literal(pattern) +
 				       ")) AS " + Quote(leaf.prefix);
 			} else {
-				out += ", MAX(CASE WHEN path = " + Literal(leaf.declaration) + " THEN " + Quote("cozip:gdal_vsi") +
+				out += ", MAX(CASE WHEN path = " + Literal(leaf.declaration) + " THEN " + Quote(TACO_LOCATION_COLUMN) +
 				       " END) AS " + Quote(leaf.declaration);
 			}
 		}

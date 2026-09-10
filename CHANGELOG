@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `read_flat` and `read_cozip` emit `cozip:location`, was `cozip:gdal_vsi`
+  (cozip spec 13.4). `read_taco` emits `taco:location` (14.5).
+- All three take `location :=` instead of `gdal_vsi :=`.
+
 ## v2.0.1
 
 ### Fixed

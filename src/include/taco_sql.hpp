@@ -26,9 +26,11 @@ struct TacoOptions {
 	//! Restricts which structure leaves become pivot columns.
 	vector<string> files;
 	bool has_files = false;
-	//! Emit GDAL VSI paths. When false the column is present but NULL.
-	bool gdal_vsi = true;
+	//! Emit the taco:location column. When false it is present but NULL.
+	bool location = true;
 };
+
+constexpr const char *TACO_LOCATION_COLUMN = "taco:location";
 
 //! Container, level layout and structure of one TACO dataset.
 struct TacoLayout {

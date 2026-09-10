@@ -19,7 +19,7 @@ SELECT count(*) FROM read_flat('test/data/flat_simple.zip');
 4
 
 query TT
-SELECT "name", "category" FROM read_flat('test/data/flat_simple.zip', gdal_vsi := false)
+SELECT "name", "category" FROM read_flat('test/data/flat_simple.zip', location := false)
 ORDER BY "name";
 ----
 denver.txt	text
@@ -29,14 +29,14 @@ tokyo.txt	text
 
 query II
 SELECT count(*), sum("size") > 0
-FROM read_flat('test/data/flat_simple.zip', gdal_vsi := false);
+FROM read_flat('test/data/flat_simple.zip', location := false);
 ----
 4	true
 
 query I
 SELECT bool_and("offset" > prev) FROM (
   SELECT "offset", LAG("offset") OVER (ORDER BY "offset") AS prev
-  FROM read_flat('test/data/flat_simple.zip', gdal_vsi := false)
+  FROM read_flat('test/data/flat_simple.zip', location := false)
 ) t
 WHERE prev IS NOT NULL;
 ----
@@ -44,29 +44,29 @@ true
 
 query I
 SELECT count(*) FROM read_flat('test/data/flat_simple.zip')
-WHERE "cozip:gdal_vsi" LIKE '/vsisubfile/%,test/data/flat_simple.zip';
+WHERE "cozip:location" LIKE '/vsisubfile/%,test/data/flat_simple.zip';
 ----
 4
 
 query I
 SELECT count(*) FROM read_flat('test/data/flat_simple.zip')
-WHERE "cozip:gdal_vsi" = '/vsisubfile/' || "offset"::VARCHAR || '_' || "size"::VARCHAR || ',test/data/flat_simple.zip';
+WHERE "cozip:location" = '/vsisubfile/' || "offset"::VARCHAR || '_' || "size"::VARCHAR || ',test/data/flat_simple.zip';
 ----
 4
 
 query I
 SELECT count(*) FROM read_flat('test/data/flat_simple.zip')
-WHERE "cozip:gdal_vsi" LIKE '%/vsicurl/%';
+WHERE "cozip:location" LIKE '%/vsicurl/%';
 ----
 0
 
 query III nosort same_rows
-SELECT "name", "offset", "size" FROM read_flat('test/data/flat_simple.zip', gdal_vsi := false)
+SELECT "name", "offset", "size" FROM read_flat('test/data/flat_simple.zip', location := false)
 ORDER BY "name";
 ----
 
 query III nosort same_rows
-SELECT "name", "offset", "size" FROM read_flat('test/data/flat_simple.zip', gdal_vsi := false)
+SELECT "name", "offset", "size" FROM read_flat('test/data/flat_simple.zip', location := false)
 ORDER BY "name";
 ----
 
@@ -80,13 +80,13 @@ SELECT count(*) FROM read_flat('test/data/flat_geo.zip');
 4
 
 query I
-SELECT count(*) FROM read_flat('test/data/flat_geo.zip', gdal_vsi := false)
+SELECT count(*) FROM read_flat('test/data/flat_geo.zip', location := false)
 WHERE "geometry" IS NOT NULL;
 ----
 4
 
 query TT
-SELECT "name", "category" FROM read_flat('test/data/flat_geo.zip', gdal_vsi := false)
+SELECT "name", "category" FROM read_flat('test/data/flat_geo.zip', location := false)
 ORDER BY "name";
 ----
 denver.txt	text
@@ -101,7 +101,7 @@ statement ok
 INSERT INTO want VALUES ('lima.txt'), ('tokyo.txt');
 
 query T
-SELECT c."name" FROM read_flat('test/data/flat_geo.zip', gdal_vsi := false) c
+SELECT c."name" FROM read_flat('test/data/flat_geo.zip', location := false) c
 JOIN want w ON c."name" = w."name"
 ORDER BY c."name";
 ----
@@ -145,3 +145,18 @@ statement error
 SELECT * FROM read_flat('test/data/flat_bad_hash.zip');
 ----
 integrity hash mismatch
+
+# read_cozip is an alias of read_flat and emits the same column.
+
+query I
+SELECT count(*) FROM read_cozip('test/data/flat_simple.zip')
+WHERE "cozip:location" LIKE '/vsisubfile/%';
+----
+4
+
+# cozip spec 13.4: the column is computed, never read from __metadata__.
+
+statement error
+SELECT "cozip:location" FROM read_parquet(
+  'cozip-subfile://' || cozip_offset_size('test/data/flat_simple.zip') || '!test/data/flat_simple.zip');
+----

@@ -19,7 +19,7 @@ FROM read_flat('dataset.zip');
 ```
 
 The result contains `name`, `offset`, `size`, any user metadata, and a
-`cozip:gdal_vsi` path for each file.
+`cozip:location` path for each file.
 
 `read_cozip()` is a deprecated alias of `read_flat()`.
 
@@ -31,7 +31,7 @@ FROM read_taco('dataset.zip');
 ```
 
 By default, `read_taco()` returns one row per sample and one column per file in
-the contract. File columns contain GDAL VSI paths.
+the contract. File columns contain locations.
 
 It accepts the three TACO containers:
 
@@ -53,7 +53,7 @@ FROM read_taco(
 
 SELECT * FROM read_taco('dataset.zip', pivoted := false);
 SELECT * FROM read_taco('dataset.zip', level := 'children/before');
-SELECT * FROM read_taco('dataset.zip', gdal_vsi := false);
+SELECT * FROM read_taco('dataset.zip', location := false);
 ```
 
 Contract helpers:
