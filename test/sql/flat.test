@@ -8,10 +8,10 @@ require parquet
 
 # flat_simple
 
-query T
-SELECT cozip_profile('test/data/flat_simple.zip');
+query IT
+SELECT cozip_profile('test/data/flat_simple.zip'), typeof(cozip_profile('test/data/flat_simple.zip'));
 ----
-flat
+1	UTINYINT
 
 query I
 SELECT count(*) FROM read_flat('test/data/flat_simple.zip');
@@ -26,6 +26,12 @@ denver.txt	text
 lima.txt	text
 paris.txt	text
 tokyo.txt	text
+
+query I
+SELECT count(*) FROM read_flat('test/data/flat_simple.zip', gdal_vsi := false)
+WHERE "cozip:location" IS NULL;
+----
+4
 
 query II
 SELECT count(*), sum("size") > 0
@@ -116,20 +122,10 @@ SELECT * FROM read_flat(NULL);
 ----
 cannot take NULL
 
-# The deprecated alias still resolves to the same manifest.
-
 query I
 SELECT count(*) FROM read_cozip('test/data/flat_simple.zip');
 ----
 4
-
-# A TACO archive is a valid cozip, so the reader has to name the profile
-# rather than fail with a parse error.
-
-statement error
-SELECT * FROM read_flat('test/data/taco_flat.zip');
-----
-Got profile=taco
 
 statement error
 SELECT * FROM read_flat('test/sql/flat.test');
@@ -146,13 +142,39 @@ SELECT * FROM read_flat('test/data/flat_bad_hash.zip');
 ----
 integrity hash mismatch
 
-# read_cozip is an alias of read_flat and emits the same column.
+query I
+SELECT cozip_profile('test/data/unsupported_profile.zip');
+----
+255
+
+statement error
+SELECT * FROM read_flat('test/data/unsupported_profile.zip');
+----
+Got profile=255
 
 query I
 SELECT count(*) FROM read_cozip('test/data/flat_simple.zip')
-WHERE "cozip:location" LIKE '/vsisubfile/%';
+WHERE "cozip:gdal_vsi" LIKE '/vsisubfile/%';
 ----
 4
+
+query I
+SELECT count(*) FROM read_cozip('test/data/flat_simple.zip', gdal_vsi := false)
+WHERE "cozip:gdal_vsi" IS NULL;
+----
+4
+
+# hf:// revisions must survive conversion to a GDAL /vsicurl/ path.
+
+query T
+SELECT cozip_vsi_base('hf://datasets/asterisk-labs/cozip-api-fixtures@v0.1.0/data/cities.zip');
+----
+/vsicurl/https://huggingface.co/datasets/asterisk-labs/cozip-api-fixtures/resolve/v0.1.0/data/cities.zip
+
+statement error
+SELECT cozip_vsi_base('hf://datasets/asterisk-labs/cozip-api-fixtures@/data/cities.zip');
+----
+empty revision
 
 # cozip spec 13.4: the column is computed, never read from __metadata__.
 

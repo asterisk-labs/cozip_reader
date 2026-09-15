@@ -3,7 +3,6 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/unordered_set.hpp"
-#include "duckdb/main/client_context.hpp"
 
 #include <cstring>
 
@@ -250,15 +249,6 @@ CozipIndex ReadCozipIndex(FileHandle &handle, const string &source) {
 	return index;
 }
 
-CozipIndex ReadCozipIndex(ClientContext &context, const string &source) {
-	auto &fs = FileSystem::GetFileSystem(context);
-	auto handle = fs.OpenFile(source, FileFlags::FILE_FLAGS_READ);
-	if (!handle) {
-		throw IOException("could not open %s", source);
-	}
-	return ReadCozipIndex(*handle, source);
-}
-
 const CozipEntry *CozipIndex::Find(const string &name) const {
 	for (auto &entry : entries) {
 		if (entry.name == name) {
@@ -273,24 +263,7 @@ string CozipIndex::OffsetSize(const string &name, const string &source) const {
 	if (!entry) {
 		throw InvalidInputException("cozip index has no entry named '%s': %s", name, source);
 	}
-	return to_string(entry->offset) + "_" + to_string(entry->size);
-}
-
-string SubFilePath(const string &source, uint64_t offset, uint64_t size) {
-	return "cozip-subfile://" + to_string(offset) + "_" + to_string(size) + "!" + source;
-}
-
-string ProfileName(uint8_t profile) {
-	switch (profile) {
-	case COZIP_PROFILE_NONE:
-		return "none";
-	case COZIP_PROFILE_FLAT:
-		return "flat";
-	case COZIP_PROFILE_TACO:
-		return "taco";
-	default:
-		return "unknown:" + to_string((int)profile);
-	}
+	return std::to_string(entry->offset) + "_" + std::to_string(entry->size);
 }
 
 string BuildVsiBase(const string &path) {
@@ -328,8 +301,17 @@ string BuildVsiBase(const string &path) {
 			throw InvalidInputException("cannot parse hf:// URL for VSI mapping: %s", path);
 		}
 		auto owner_repo = rest.substr(0, second);
+		string revision = "main";
+		auto revision_separator = owner_repo.find('@', first + 1);
+		if (revision_separator != string::npos) {
+			revision = owner_repo.substr(revision_separator + 1);
+			owner_repo = owner_repo.substr(0, revision_separator);
+			if (revision.empty()) {
+				throw InvalidInputException("cannot parse hf:// URL with an empty revision: %s", path);
+			}
+		}
 		auto inner = rest.substr(second + 1);
-		return "/vsicurl/https://huggingface.co/" + ns_prefix + owner_repo + "/resolve/main/" + inner;
+		return "/vsicurl/https://huggingface.co/" + ns_prefix + owner_repo + "/resolve/" + revision + "/" + inner;
 	}
 	return path;
 }

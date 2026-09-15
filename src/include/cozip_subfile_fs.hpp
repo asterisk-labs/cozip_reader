@@ -33,8 +33,8 @@ private:
 
 // Handles the internal "cozip-subfile://<offset>_<size>!<underlying>" scheme.
 // offset and size are ASCII decimal uint64; underlying is any path the
-// surrounding VFS can OpenFile(). Constructed only by the read_cozip macro
-// body, never written by users.
+// surrounding VFS can OpenFile(). Constructed only by the Flat reader macros,
+// never written by users.
 class CozipSubFileSystem final : public FileSystem {
 public:
 	CozipSubFileSystem() : FileSystem() {

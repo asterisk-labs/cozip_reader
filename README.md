@@ -1,6 +1,6 @@
 # cozip_reader
 
-DuckDB extension for reading cozip archives.
+DuckDB extension for reading Flat-profile cozip archives.
 
 ## Install
 
@@ -11,7 +11,7 @@ LOAD cozip;
 
 Linux, macOS and Windows. WebAssembly is not supported.
 
-## Flat archives
+## Read an archive
 
 ```sql
 SELECT *
@@ -21,50 +21,43 @@ FROM read_flat('dataset.zip');
 The result contains `name`, `offset`, `size`, any user metadata, and a
 `cozip:location` path for each file.
 
-`read_cozip()` is a deprecated alias of `read_flat()`.
-
-## TACO archives
-
-```sql
-SELECT *
-FROM read_taco('dataset.zip');
-```
-
-By default, `read_taco()` returns one row per sample and one column per file in
-the contract. File columns contain locations.
-
-It accepts the three TACO containers:
+Remote archives work through DuckDB's `httpfs` extension. These public
+examples contain the same Flat archive:
 
 ```sql
-SELECT * FROM read_taco('dataset.zip');  -- ZIP
-SELECT * FROM read_taco('dataset/');     -- FOLDER
-SELECT * FROM read_taco('.tacocat/');    -- TACOCAT
-```
-
-Common options:
-
-```sql
-SELECT *
-FROM read_taco(
-  'dataset.zip',
-  idx := [0, 100],
-  files := ['before/B02.tif', 'after/B02.tif']
+-- Source Cooperative
+SELECT * FROM read_flat(
+  'https://data.source.coop/asterisk-labs/cozip-api-fixtures/data/cities.zip'
 );
 
-SELECT * FROM read_taco('dataset.zip', pivoted := false);
-SELECT * FROM read_taco('dataset.zip', level := 'children/before');
-SELECT * FROM read_taco('dataset.zip', location := false);
+-- Hugging Face, pinned to a revision
+SELECT * FROM read_flat(
+  'hf://datasets/asterisk-labs/cozip-api-fixtures@v0.1.0/data/cities.zip'
+);
 ```
 
-Contract helpers:
+Pass `location := false` when only the manifest is needed:
 
 ```sql
-SELECT cozip_profile('dataset.zip');
-SELECT taco_structure('dataset.zip');
-SELECT taco_levels('dataset.zip');
-SELECT taco_derived('dataset.zip');
-SELECT taco_collection('dataset.zip');
-SELECT * FROM taco_contract('dataset.zip');
+SELECT * FROM read_flat('dataset.zip', location := false);
+```
+
+`cozip_profile()` reads only the archive bootstrap and returns the raw profile
+byte. `read_flat()` accepts profile `1` and rejects every other profile.
+
+```sql
+SELECT cozip_profile('dataset.zip'); -- 1 for Flat
+```
+
+## Compatibility
+
+The original API remains available. `read_cozip()` emits the legacy
+`cozip:gdal_vsi` column, and `gdal_vsi` remains accepted by `read_flat()` as an
+alias for `location`.
+
+```sql
+SELECT * FROM read_cozip('dataset.zip', gdal_vsi := true);
+SELECT * FROM read_flat('dataset.zip', gdal_vsi := false);
 ```
 
 ## Build

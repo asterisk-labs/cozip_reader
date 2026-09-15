@@ -1,7 +1,7 @@
 extension:
   name: cozip
   description: Cloud-Optimized ZIP reader for DuckDB
-  version: 2.0.1
+  version: 3.0.0
   language: C++
   build: cmake
   license: MIT
@@ -17,24 +17,25 @@ docs:
     INSTALL cozip FROM community;
     LOAD cozip;
 
-    -- One row per sample, one column per file, ready for a dataloader.
-    SELECT * FROM read_taco('https://example.org/cloudsen12.zip') LIMIT 10;
+    -- One row per file in a Flat-profile archive on Source Cooperative.
+    SELECT * FROM read_flat(
+      'https://data.source.coop/asterisk-labs/cozip-api-fixtures/data/cities.zip'
+    ) LIMIT 10;
 
-    -- A Flat-profile archive is a plain manifest instead.
-    SELECT * FROM read_flat('https://example.org/dataset.zip') LIMIT 10;
+    -- The same archive on Hugging Face, pinned to a revision.
+    SELECT * FROM read_flat(
+      'hf://datasets/asterisk-labs/cozip-api-fixtures@v0.1.0/data/cities.zip'
+    ) LIMIT 10;
 
   extended_description: |
     cozip puts an index at byte 0 of a ZIP archive, so a reader reaches any
     file inside it in one range request instead of scanning the Central
-    Directory. This extension reads both cozip profiles without downloading
-    the archive, over HTTPS, S3, GCS, Azure or HuggingFace.
+    Directory. This extension reads Flat-profile cozip archives without
+    downloading them, over HTTPS, S3, GCS, Azure or Hugging Face.
 
     read_flat(path) returns the Flat-profile manifest: one row per entry with
     name, offset, size and whatever columns the writer added.
 
-    read_taco(path) returns one row per sample with one column per file in the
-    contract. Pass pivoted := false for one row per file. It reads .zip,
-    FOLDER, and TACOCAT datasets.
-
-    Every data column holds a GDAL /vsisubfile/ path that opens the referenced
-    file in GDAL, rasterio or terra without extracting the archive.
+    cozip:location holds a GDAL /vsisubfile/ path that opens the referenced
+    file in GDAL, rasterio or terra without extracting the archive. The
+    original read_cozip(path, gdal_vsi := ...) API remains available.

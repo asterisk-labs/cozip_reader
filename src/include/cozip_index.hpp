@@ -30,6 +30,7 @@ static constexpr const char *COZIP_PADDING_NAME = "__cozip_padding__";
 
 static constexpr uint8_t COZIP_PROFILE_NONE = 0;
 static constexpr uint8_t COZIP_PROFILE_FLAT = 1;
+// Registered profile identifier. This extension does not interpret it.
 static constexpr uint8_t COZIP_PROFILE_TACO = 2;
 
 // One priority entry: a byte range of the archive holding a whole file.
@@ -56,16 +57,7 @@ uint8_t ReadCozipProfile(FileHandle &handle, const string &source);
 //! Full index. One read of at most 64 KiB for a typical archive.
 CozipIndex ReadCozipIndex(FileHandle &handle, const string &source);
 
-//! Open `source` through the context filesystem and read its index.
-CozipIndex ReadCozipIndex(ClientContext &context, const string &source);
-
 //! Map a storage URL onto its GDAL virtual filesystem equivalent.
 string BuildVsiBase(const string &path);
-
-//! A cozip-subfile:// path addressing one byte range of `source`.
-string SubFilePath(const string &source, uint64_t offset, uint64_t size);
-
-//! Human name of a profile byte: none, flat, taco or unknown:<n>.
-string ProfileName(uint8_t profile);
 
 } // namespace duckdb

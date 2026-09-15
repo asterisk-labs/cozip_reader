@@ -1,12 +1,38 @@
 # Changelog
 
-## Unreleased
+## Unreleased (3.0.0)
 
 ### Changed
 
-- `read_flat` and `read_cozip` emit `cozip:location`, was `cozip:gdal_vsi`
-  (cozip spec 13.4). `read_taco` emits `taco:location` (14.5).
-- All three take `location :=` instead of `gdal_vsi :=`.
+- The extension is Flat-only again. Format-specific dataset interpretation
+  belongs in packages built on top of cozip, not in this byte-range reader.
+- `cozip_profile(path)` now returns the raw `UTINYINT` profile byte. The
+  extension only gives semantic meaning to profile `1` (Flat).
+- `read_cozip(path, gdal_vsi := ...)` and the `gdal_vsi` option on
+  `read_flat()` remain supported for compatibility with the original API.
+- The previously announced removal of `read_cozip` in 3.0 is cancelled; the
+  alias remains part of the supported compatibility surface.
+- `hf://` paths preserve an explicit `@revision` when converted to their GDAL
+  `/vsicurl/` location.
+
+### Removed
+
+- `read_taco`, `taco_contract`, `taco_structure`, `taco_levels`,
+  `taco_derived`, `taco_collection`, and `taco_sql`, together with their
+  format-specific parsing code, tests, and fixtures.
+
+## v2.0.2 — 2026-09-09
+
+### Changed
+
+- `read_flat` emits `cozip:location` (cozip spec 13.4). `read_taco` emits
+  `taco:location` (14.5). Both take `location :=`.
+- Stored `cozip:location` and `taco:location` columns are ignored. Location
+  values are always derived from the physical payload at read time.
+- HTTP TACO archives no longer require filesystem directory probing before
+  their CoZIP index is read.
+- Remote FOLDER and TACOCAT datasets discover their Parquet levels from
+  `COLLECTION.json`, so HTTP and Hugging Face sources need no directory listing.
 
 ## v2.0.1
 
