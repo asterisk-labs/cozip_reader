@@ -1,0 +1,237 @@
+# name: test/sql/subfile.test
+# group: [sql]
+
+require cozip
+
+require parquet
+
+
+# cozip-subfile paths
+
+statement ok
+SET VARIABLE lima = (
+  SELECT 'cozip-subfile://' || "offset" || '_' || "size" || '!test/data/flat_simple.zip'
+  FROM read_flat('test/data/flat_simple.zip', location := false) WHERE "name" = 'lima.txt');
+
+query II
+SELECT size, content = repeat('Lima, Peru. 12 S, 77 W.' || chr(10), 400) FROM read_text(getvariable('lima'));
+----
+9600	true
+
+query I
+SELECT count(*) FROM read_parquet(
+  'cozip-subfile://' || cozip_offset_size('test/data/flat_simple.zip') || '!test/data/flat_simple.zip');
+----
+4
+
+# Nested paths
+
+statement ok
+SET VARIABLE nested = (
+  SELECT 'cozip-subfile://100_' || "size" || '!cozip-subfile://' || ("offset" - 100) || '_' || ("size" + 200)
+         || '!test/data/flat_simple.zip'
+  FROM read_flat('test/data/flat_simple.zip', location := false) WHERE "name" = 'lima.txt');
+
+query I
+SELECT content = repeat('Lima, Peru. 12 S, 77 W.' || chr(10), 400) FROM read_text(getvariable('nested'));
+----
+true
+
+# Bounds
+
+statement ok
+SET VARIABLE archive_size = (SELECT size FROM read_blob('test/data/flat_simple.zip'));
+
+query I
+SELECT size = getvariable('archive_size')
+FROM read_blob('cozip-subfile://0_' || getvariable('archive_size') || '!test/data/flat_simple.zip');
+----
+true
+
+query I
+SELECT size FROM read_blob('cozip-subfile://' || getvariable('archive_size') || '_0!test/data/flat_simple.zip');
+----
+0
+
+statement error
+SELECT size FROM read_blob('cozip-subfile://' || getvariable('archive_size') || '_1!test/data/flat_simple.zip');
+----
+subfile range is outside the underlying file
+
+statement error
+SELECT size FROM read_blob('cozip-subfile://1_' || getvariable('archive_size') || '!test/data/flat_simple.zip');
+----
+subfile range is outside the underlying file
+
+statement error
+SELECT size FROM read_blob('cozip-subfile://18446744073709551615_2!test/data/flat_simple.zip');
+----
+subfile range is outside the underlying file
+
+# Invalid cozip-subfile paths
+
+statement error
+SELECT size FROM read_blob('cozip-subfile://130_9600test/data/flat_simple.zip');
+----
+missing '!' separator
+
+statement error
+SELECT size FROM read_blob('cozip-subfile://1309600!test/data/flat_simple.zip');
+----
+missing '_' separator
+
+statement error
+SELECT size FROM read_blob('cozip-subfile://13x_9600!test/data/flat_simple.zip');
+----
+non-digit in offset
+
+statement error
+SELECT size FROM read_blob('cozip-subfile://99999999999999999999_1!test/data/flat_simple.zip');
+----
+offset exceeds uint64
+
+statement error
+SELECT size FROM read_blob('cozip-subfile://130_9600!');
+----
+empty underlying
+
+statement error
+SELECT size FROM read_blob('cozip-subfile://130_9600!test/data/does_not_exist.zip');
+----
+does_not_exist.zip
+
+# read_flat locations are /vsisubfile paths.
+
+statement ok
+SET VARIABLE lima_location = (
+  SELECT "cozip:location" FROM read_flat('test/data/flat_simple.zip') WHERE "name" = 'lima.txt');
+
+query I
+SELECT getvariable('lima_location') LIKE '/vsisubfile/%,test/data/flat_simple.zip';
+----
+true
+
+query II
+SELECT size, content = repeat('Lima, Peru. 12 S, 77 W.' || chr(10), 400) FROM read_text(getvariable('lima_location'));
+----
+9600	true
+
+query I
+SELECT count(*) FROM read_parquet(
+  '/vsisubfile/' || cozip_offset_size('test/data/flat_simple.zip') || ',test/data/flat_simple.zip');
+----
+4
+
+# Open-ended /vsisubfile ranges
+
+query I
+SELECT size = getvariable('archive_size') - 100 FROM read_blob('/vsisubfile/100,test/data/flat_simple.zip');
+----
+true
+
+query I
+SELECT size = getvariable('archive_size') - 100 FROM read_blob('/vsisubfile/100_0,test/data/flat_simple.zip');
+----
+true
+
+query I
+SELECT size FROM read_blob('/vsisubfile/' || getvariable('archive_size') || ',test/data/flat_simple.zip');
+----
+0
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/' || (getvariable('archive_size') + 1) || ',test/data/flat_simple.zip');
+----
+subfile range is outside the underlying file
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/1_' || getvariable('archive_size') || ',test/data/flat_simple.zip');
+----
+subfile range is outside the underlying file
+
+# Mixed nesting
+
+statement ok
+SET VARIABLE mixed = (
+  SELECT '/vsisubfile/100_' || "size" || ',cozip-subfile://' || ("offset" - 100) || '_' || ("size" + 200)
+         || '!/vsisubfile/0_' || getvariable('archive_size') || ',test/data/flat_simple.zip'
+  FROM read_flat('test/data/flat_simple.zip', location := false) WHERE "name" = 'lima.txt');
+
+query I
+SELECT content = repeat('Lima, Peru. 12 S, 77 W.' || chr(10), 400) FROM read_text(getvariable('mixed'));
+----
+true
+
+# With autoload off, the error shows the DuckDB path after VSI conversion.
+
+statement ok
+SET autoload_known_extensions = false;
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/0_1,/vsicurl/https://example.org/a.zip');
+----
+File https://example.org/a.zip requires the extension httpfs
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/0_1,/vsis3/bucket/a.zip');
+----
+File s3://bucket/a.zip requires the extension httpfs
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/0_1,/vsigs/bucket/a.zip');
+----
+File gs://bucket/a.zip requires the extension httpfs
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/0_1,/vsiaz/container/a.zip');
+----
+File az://container/a.zip requires the extension azure
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/0_1,/vsiadls/filesystem/a.zip');
+----
+File abfss://filesystem/a.zip requires the extension azure
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/0_1,/vsihf/datasets/owner/repo@v1/a.zip');
+----
+File hf://datasets/owner/repo@v1/a.zip requires the extension httpfs
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/0_1,/vsisource/account/product/a.zip');
+----
+File https://data.source.coop/account/product/a.zip requires the extension httpfs
+
+# DuckDB-only schemes pass through.
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/0_1,r2://bucket/a.zip');
+----
+File r2://bucket/a.zip requires the extension httpfs
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/0_1,/vsizip/test/data/flat_simple.zip');
+----
+unsupported GDAL file system
+
+# Invalid /vsisubfile paths
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/130_9600test/data/flat_simple.zip');
+----
+missing ',' separator
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/130_9600,');
+----
+empty underlying
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/_9600,test/data/flat_simple.zip');
+----
+empty offset
+
+statement error
+SELECT size FROM read_blob('/vsisubfile/130_-1,test/data/flat_simple.zip');
+----
+non-digit in size

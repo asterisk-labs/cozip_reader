@@ -273,6 +273,9 @@ string BuildVsiBase(const string &path) {
 	if (StringUtil::StartsWith(path, "s3://")) {
 		return "/vsis3/" + path.substr(5);
 	}
+	if (StringUtil::StartsWith(path, "s3a://") || StringUtil::StartsWith(path, "s3n://")) {
+		return "/vsis3/" + path.substr(6);
+	}
 	if (StringUtil::StartsWith(path, "gcs://")) {
 		return "/vsigs/" + path.substr(6);
 	}
@@ -284,6 +287,9 @@ string BuildVsiBase(const string &path) {
 	}
 	if (StringUtil::StartsWith(path, "azure://")) {
 		return "/vsiaz/" + path.substr(8);
+	}
+	if (StringUtil::StartsWith(path, "az://")) {
+		return "/vsiaz/" + path.substr(5);
 	}
 	if (StringUtil::StartsWith(path, "hf://")) {
 		auto rest = path.substr(5);
@@ -313,6 +319,7 @@ string BuildVsiBase(const string &path) {
 		auto inner = rest.substr(second + 1);
 		return "/vsicurl/https://huggingface.co/" + ns_prefix + owner_repo + "/resolve/" + revision + "/" + inner;
 	}
+	// R2 needs an account endpoint before it can be mapped to /vsis3/.
 	return path;
 }
 

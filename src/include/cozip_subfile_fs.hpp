@@ -5,9 +5,7 @@
 
 namespace duckdb {
 
-// Exposes a contiguous byte range of an underlying FileHandle as if it were
-// a standalone file of size sub_size starting at byte 0. Reads translate
-// and delegate to inner_handle; no buffering, no IO at open time.
+// A bounded view of another file. Reads use offsets relative to the view.
 class CozipSubFileHandle final : public FileHandle {
 	friend class CozipSubFileSystem;
 
@@ -31,10 +29,8 @@ private:
 	idx_t seek_pos;
 };
 
-// Handles the internal "cozip-subfile://<offset>_<size>!<underlying>" scheme.
-// offset and size are ASCII decimal uint64; underlying is any path the
-// surrounding VFS can OpenFile(). Constructed only by the Flat reader macros,
-// never written by users.
+// Read-only views using either cozip-subfile://<offset>_<size>!<path> or
+// /vsisubfile/<offset>[_<size>],<path>. In the GDAL form, size 0 means EOF.
 class CozipSubFileSystem final : public FileSystem {
 public:
 	CozipSubFileSystem() : FileSystem() {
@@ -60,15 +56,11 @@ public:
 	bool OnDiskFile(FileHandle &handle) override;
 	FileType GetFileType(FileHandle &handle) override;
 	timestamp_t GetLastModifiedTime(FileHandle &handle) override;
+	string GetVersionTag(FileHandle &handle) override;
 
-	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener) override {
-		if (path.size() >= 16 && path.substr(0, 16) == "cozip-subfile://") {
-			return {OpenFileInfo(path)};
-		}
-		return {};
-	}
+	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener) override;
 	bool FileExists(const string &filename, optional_ptr<FileOpener> opener) override {
-		return filename.size() >= 16 && filename.substr(0, 16) == "cozip-subfile://";
+		return CanHandleFile(filename);
 	}
 };
 

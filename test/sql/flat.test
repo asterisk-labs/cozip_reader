@@ -176,6 +176,30 @@ SELECT cozip_vsi_base('hf://datasets/asterisk-labs/cozip-api-fixtures@/data/citi
 ----
 empty revision
 
+# Storage URL mapping. R2 stays as a DuckDB URL because GDAL needs its endpoint.
+
+query II
+SELECT url, cozip_vsi_base(url) FROM (VALUES
+  ('https://example.org/a.zip'), ('http://example.org/a.zip'),
+  ('s3://bucket/a.zip'), ('s3a://bucket/a.zip'), ('s3n://bucket/a.zip'),
+  ('gs://bucket/a.zip'), ('gcs://bucket/a.zip'),
+  ('az://container/a.zip'), ('azure://container/a.zip'), ('abfss://filesystem/a.zip'),
+  ('r2://bucket/a.zip'), ('test/data/flat_simple.zip')) t(url)
+ORDER BY url;
+----
+abfss://filesystem/a.zip	/vsiadls/filesystem/a.zip
+az://container/a.zip	/vsiaz/container/a.zip
+azure://container/a.zip	/vsiaz/container/a.zip
+gcs://bucket/a.zip	/vsigs/bucket/a.zip
+gs://bucket/a.zip	/vsigs/bucket/a.zip
+http://example.org/a.zip	/vsicurl/http://example.org/a.zip
+https://example.org/a.zip	/vsicurl/https://example.org/a.zip
+r2://bucket/a.zip	r2://bucket/a.zip
+s3://bucket/a.zip	/vsis3/bucket/a.zip
+s3a://bucket/a.zip	/vsis3/bucket/a.zip
+s3n://bucket/a.zip	/vsis3/bucket/a.zip
+test/data/flat_simple.zip	test/data/flat_simple.zip
+
 # cozip spec 13.4: the column is computed, never read from __metadata__.
 
 statement error
