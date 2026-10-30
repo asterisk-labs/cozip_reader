@@ -49,6 +49,34 @@ byte. `read_flat()` accepts profile `1` and rejects every other profile.
 SELECT cozip_profile('dataset.zip'); -- 1 for Flat
 ```
 
+## Read a file inside an archive
+
+Pass the `cozip:location` returned by `read_flat()` to `read_parquet`,
+`read_text`, or another DuckDB reader. TACO ZIP datasets use the same path
+format for their `::location` values. Readers can fetch the needed byte ranges
+without unpacking the archive.
+
+```sql
+SELECT count(*) FROM read_parquet('/vsisubfile/1032_52411,/vsicurl/https://example.org/dataset.zip');
+```
+
+The syntax is `/vsisubfile/<offset>[_<size>],<path>`. An omitted or zero size
+reads through EOF. `<path>` can be local, another subfile, or a GDAL storage
+path: `/vsicurl/`, `/vsis3/`, `/vsigs/`, `/vsiaz/`, `/vsiadls/`, `/vsihf/`, or
+`/vsisource/`. These map to DuckDB's HTTP, S3, GCS, Azure, and Hugging Face
+paths. `/vsisource/` is limited to public files at `https://data.source.coop/`;
+it does not use `SOURCE_ENDPOINT` or signed Source access.
+
+For a DuckDB path, use `cozip-subfile://<offset>_<size>!<path>`. Unlike the
+GDAL form, size 0 means an empty file.
+
+```sql
+SELECT 'cozip-subfile://' || "offset" || '_' || "size" || '!s3://bucket/dataset.zip' AS path
+FROM read_flat('s3://bucket/dataset.zip', location := false);
+```
+
+Both forms are read-only and reject ranges outside the source file.
+
 ## Compatibility
 
 The original API remains available. `read_cozip()` emits the legacy

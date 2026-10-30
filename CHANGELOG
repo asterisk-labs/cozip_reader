@@ -2,6 +2,14 @@
 
 ## Unreleased (3.0.0)
 
+### Added
+
+- `cozip-subfile://<offset>_<size>!<path>` can now be passed to DuckDB readers
+  to access a stored file inside an archive.
+- DuckDB readers can open `/vsisubfile/` paths, including `cozip:location` and
+  TACO ZIP `::location` values. GDAL storage prefixes map to DuckDB paths;
+  `/vsisource/` uses the public `https://data.source.coop/` endpoint only.
+
 ### Changed
 
 - The extension is Flat-only again. Format-specific dataset interpretation
@@ -14,12 +22,22 @@
   alias remains part of the supported compatibility surface.
 - `hf://` paths preserve an explicit `@revision` when converted to their GDAL
   `/vsicurl/` location.
+- `cozip:location` now maps `az://`, `s3a://`, and `s3n://` archives to
+  `/vsiaz/` and `/vsis3/` paths.
 
 ### Removed
 
 - `read_taco`, `taco_contract`, `taco_structure`, `taco_levels`,
   `taco_derived`, `taco_collection`, and `taco_sql`, together with their
   format-specific parsing code, tests, and fixtures.
+
+### Fixed
+
+- Remote subfile reads use direct I/O to avoid httpfs's 1 MiB read-ahead.
+- Out-of-bounds subfile ranges fail at open time.
+- Cached remote subfiles are revalidated under
+  `validate_external_file_cache = 'VALIDATE_REMOTE'`. Their handles also
+  forward the underlying file's version tag.
 
 ## v2.0.2 — 2026-09-09
 
