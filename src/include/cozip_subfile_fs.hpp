@@ -12,8 +12,8 @@ class CozipSubFileHandle final : public FileHandle {
 public:
 	CozipSubFileHandle(FileSystem &file_system, const string &path, FileOpenFlags flags,
 	                   unique_ptr<FileHandle> inner_handle_p, idx_t base_offset_p, idx_t sub_size_p)
-	    : FileHandle(file_system, path, flags), inner_handle(std::move(inner_handle_p)), base_offset(base_offset_p),
-	      sub_size(sub_size_p), seek_pos(0) {
+	    : FileHandle(file_system, path, std::move(flags)), inner_handle(std::move(inner_handle_p)),
+	      base_offset(base_offset_p), sub_size(sub_size_p), seek_pos(0) {
 	}
 
 	void Close() override {

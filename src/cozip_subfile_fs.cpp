@@ -13,14 +13,15 @@
 
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace duckdb {
 
-static const string COZIP_PREFIX = "cozip-subfile://";
-static const string GDAL_PREFIX = "/vsisubfile/";
+static constexpr std::string_view COZIP_PREFIX = "cozip-subfile://";
+static constexpr std::string_view GDAL_PREFIX = "/vsisubfile/";
 
-static bool HasPrefix(const string &path, const string &prefix) {
-	return path.size() > prefix.size() && path.compare(0, prefix.size(), prefix) == 0;
+static bool HasPrefix(const string &path, std::string_view prefix) {
+	return path.size() > prefix.size() && path.compare(0, prefix.size(), prefix.data(), prefix.size()) == 0;
 }
 
 bool CozipSubFileSystem::CanHandleFile(const string &fpath) {
@@ -84,7 +85,7 @@ static string DuckDBPathFromGdal(const string &gdal_path, const string &path) {
 	}
 	for (auto &prefix : PREFIXES) {
 		if (HasPrefix(gdal_path, prefix[0])) {
-			return prefix[1] + gdal_path.substr(string(prefix[0]).size());
+			return prefix[1] + gdal_path.substr(std::string_view(prefix[0]).size());
 		}
 	}
 	if (gdal_path.compare(0, 4, "/vsi") == 0) {

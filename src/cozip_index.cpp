@@ -208,7 +208,7 @@ CozipIndex ReadCozipIndex(FileHandle &handle, const string &source) {
 		if (cursor + name_lengths[i] > limit) {
 			throw InvalidInputException("cozip index is truncated in its names: %s", source);
 		}
-		index.entries[i].name = string((const char *)cursor, name_lengths[i]);
+		index.entries[i].name = string(reinterpret_cast<const char *>(cursor), name_lengths[i]);
 		cursor += name_lengths[i];
 	}
 	for (idx_t i = 0; i < count; i++) {

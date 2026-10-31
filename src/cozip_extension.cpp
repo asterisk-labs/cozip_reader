@@ -26,7 +26,7 @@
 
 namespace duckdb {
 
-static const char *FLAT_METADATA_NAME = "__metadata__";
+static const char *const FLAT_METADATA_NAME = "__metadata__";
 
 static unique_ptr<FileHandle> OpenSource(ClientContext &context, const string &path, const char *function_name) {
 	auto &fs = FileSystem::GetFileSystem(context);
@@ -42,7 +42,7 @@ template <typename Body>
 static void StringScalarLoop(DataChunk &args, Vector &result, const char *function_name, Body body) {
 	auto count = args.size();
 	auto constant = args.data[0].GetVectorType() == VectorType::CONSTANT_VECTOR;
-	args.data[0].Flatten(count);
+	args.data[0].Flatten();
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 
 	auto source = FlatVector::GetData<string_t>(args.data[0]);
@@ -87,7 +87,7 @@ static void CozipVsiBaseFunction(DataChunk &args, ExpressionState &, Vector &res
 }
 
 // One row per archive entry, plus where its payload can be read from.
-static const char *FLAT_MACRO_BODY = R"sql(
+static const char *const FLAT_MACRO_BODY = R"sql(
 SELECT COLUMNS(lambda c: c != 'cozip:location' AND c != 'cozip:gdal_vsi'),
   CASE WHEN coalesce(location, gdal_vsi, true)
        THEN '/vsisubfile/' || "offset" || '_' || "size" || ',' || cozip_vsi_base(p)
@@ -96,7 +96,7 @@ SELECT COLUMNS(lambda c: c != 'cozip:location' AND c != 'cozip:gdal_vsi'),
 FROM read_parquet('cozip-subfile://' || cozip_offset_size(p) || '!' || p)
 )sql";
 
-static const char *LEGACY_FLAT_MACRO_BODY = R"sql(
+static const char *const LEGACY_FLAT_MACRO_BODY = R"sql(
 SELECT COLUMNS(lambda c: c != 'cozip:location' AND c != 'cozip:gdal_vsi'),
   CASE WHEN gdal_vsi
        THEN '/vsisubfile/' || "offset" || '_' || "size" || ',' || cozip_vsi_base(p)
@@ -109,7 +109,7 @@ FROM read_parquet('cozip-subfile://' || cozip_offset_size(p) || '!' || p)
 //! catalog, which only accepts internal entries in the main schema; the
 //! Parser leaves both fields default, so they are set here.
 static void RegisterTableMacro(ExtensionLoader &loader, const string &signature, const string &body) {
-	Parser parser;
+	auto parser = Parser::GetBuiltinParser();
 	parser.ParseQuery("CREATE OR REPLACE MACRO " + signature + " AS TABLE " + body + ";");
 	if (parser.statements.empty()) {
 		throw IOException("cozip: macro SQL produced no statements: %s", signature);
